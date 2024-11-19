@@ -88,19 +88,22 @@ class EnhancedMockWorker {
     this.meshes = new Map()
   }
 
-  getBlockColor(blockId) {
-    const colors = {
-      stone: 0x808080,
-      dirt: 0x8B4513,
-      grass_block: 0x567D46,
-      wood: 0x8B4513,
-      planks: 0xDEB887,
-      glass: 0xADD8E6,
-      default: 0xAAAAAA
-    }
-    
+  getBlockTexture(blockId) {
     const block = this.mcData.blocks[blockId]
-    return colors[block?.name] || colors.default
+    if (!block) return null
+
+    // Get block state and model
+    const blockState = this.mcData.blockStates[block.minStateId]
+    if (!blockState || !blockState.variants || !blockState.variants.normal) {
+      return null
+    }
+
+    const model = blockState.variants.normal.model
+    if (!model || !model.textures) return null
+
+    // Use the first available texture
+    const firstTexture = Object.values(model.textures)[0]
+    return firstTexture
   }
 
   async processMessage(data) {
@@ -112,9 +115,9 @@ class EnhancedMockWorker {
         
         const geometry = new THREE.BoxGeometry(1, 1, 1)
         const material = new THREE.MeshStandardMaterial({ 
-          color: this.getBlockColor(block.type),
           roughness: 0.8,
-          metalness: 0.2
+          metalness: 0.2,
+          color: 0xAAAAAA
         })
         
         const mesh = new THREE.Mesh(geometry, material)
@@ -323,10 +326,15 @@ const setupScene = (viewer, size) => {
 // Export GLTF
 const exportGLTF = (scene, fileName) => {
   return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('GLTF export timed out after 30 seconds'))
+    }, 30000)
+
     try {
       const exporter = new GLTFExporter()
       
       exporter.parse(scene, async (result) => {
+        clearTimeout(timeout)
         await fs.mkdir('./gltf_out', { recursive: true })
         await fs.writeFile(
           path.join('./gltf_out', fileName), 
@@ -334,13 +342,17 @@ const exportGLTF = (scene, fileName) => {
         )
         resolve(fileName)
       }, 
-      (error) => reject(error),
+      (error) => {
+        clearTimeout(timeout)
+        reject(error)
+      },
       {
         binary: false,
         onlyVisible: true,
         includeCustomExtensions: true
       })
     } catch (error) {
+      clearTimeout(timeout)
       reject(error)
     }
   })
@@ -476,16 +488,28 @@ const main = async () => {
     console.log(`Generated ${meshCount} meshes`)
     
     // Give time for all meshes to be added to the scene
-    await new Promise(resolve => setTimeout(resolve, 3000))
+    console.log('Waiting for meshes...')
+    await new Promise(resolve => setTimeout(resolve, 5000))
     
     // Render the scene
-    renderer.render(viewer.scene, viewer.camera)
-    
-    console.log('Exporting to GLTF...')
     const fileName = `minecraft_structure_${Date.now()}.gltf`
-    await exportGLTF(viewer.scene, fileName)
     
-    console.log(`Successfully exported to: ./gltf_out/${fileName}`)
+    try {
+      console.log('Starting render...')
+      renderer.render(viewer.scene, viewer.camera)
+      console.log('Render complete')
+      
+      console.log('Starting GLTF export...')
+      await exportGLTF(viewer.scene, fileName).catch(error => {
+        console.error('GLTF export error:', error)
+        throw error
+      })
+      
+      console.log(`Successfully exported to: ./gltf_out/${fileName}`)
+    } catch (error) {
+      console.error('Error during render/export:', error)
+      throw error
+    }
     process.exit(0)
   } catch (error) {
     console.error('Error:', error)

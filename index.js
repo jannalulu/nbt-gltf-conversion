@@ -10,6 +10,11 @@ import { parse, simplify } from 'prismarine-nbt'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { Blob, FileReader } from 'vblob'
+
+// Polyfill for GLTF export
+global.Blob = Blob
+global.FileReader = FileReader 
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -21,9 +26,7 @@ const VIEWPORT = {
   center: new Vec3(0, 0, 0),
 }
 
-// Use Node's worker_threads for proper worker functionality
-import { Worker } from 'worker_threads'
-
+// Mock implementations
 const createMockCanvas = (width, height) => {
   const canvas = createCanvas(width, height)
   canvas.addEventListener = () => {}
@@ -47,43 +50,225 @@ const createMockCanvas = (width, height) => {
     style: {}
   }
   canvas.ownerDocument = {
-    defaultView: global.window
+    defaultView: {
+      innerWidth: width,
+      innerHeight: height,
+      devicePixelRatio: 1,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      navigator: { userAgent: 'node' },
+      getComputedStyle: () => ({
+        getPropertyValue: () => ''
+      }),
+      requestAnimationFrame: (callback) => setTimeout(callback, 16),
+      cancelAnimationFrame: (id) => clearTimeout(id),
+      location: { href: '' }
+    }
   }
+  
+  // Add WebGL context methods
+  const context = canvas.getContext('webgl2')
+  canvas.getContext = (type) => {
+    if (type === 'webgl2' || type === 'webgl') {
+      return context
+    }
+    return null
+  }
+  
   return canvas
 }
 
+class EnhancedMockWorker {
+  constructor(scene, mcData) {
+    this.onmessage = null
+    this.messageQueue = []
+    this.processingQueue = false
+    this.scene = scene
+    this.mcData = mcData
+    this.meshes = new Map()
+  }
+
+  getBlockColor(blockId) {
+    const colors = {
+      stone: 0x808080,
+      dirt: 0x8B4513,
+      grass_block: 0x567D46,
+      wood: 0x8B4513,
+      planks: 0xDEB887,
+      glass: 0xADD8E6,
+      default: 0xAAAAAA
+    }
+    
+    const block = this.mcData.blocks[blockId]
+    return colors[block?.name] || colors.default
+  }
+
+  async processMessage(data) {
+    if (data.type === 'add_mesh') {
+      const { x, z, blocks } = data
+      
+      for (const block of blocks) {
+        if (block.type === 0) continue // Skip air blocks
+        
+        const geometry = new THREE.BoxGeometry(1, 1, 1)
+        const material = new THREE.MeshStandardMaterial({ 
+          color: this.getBlockColor(block.type),
+          roughness: 0.8,
+          metalness: 0.2
+        })
+        
+        const mesh = new THREE.Mesh(geometry, material)
+        mesh.position.set(
+          x * 16 + block.position[0],
+          block.position[1],
+          z * 16 + block.position[2]
+        )
+        
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        
+        const key = `${x},${block.position[1]},${z},${block.position.join(',')}`
+        this.meshes.set(key, mesh)
+        this.scene.add(mesh)
+      }
+    }
+  }
+
+  postMessage(data) {
+    this.messageQueue.push(data)
+    if (!this.processingQueue) {
+      this.processingQueue = true
+      while (this.messageQueue.length > 0) {
+        const message = this.messageQueue.shift()
+        this.processMessage(message)
+      }
+      this.processingQueue = false
+    }
+  }
+
+  terminate() {
+    this.meshes.forEach(mesh => {
+      this.scene.remove(mesh)
+      mesh.geometry.dispose()
+      mesh.material.dispose()
+    })
+    this.meshes.clear()
+  }
+}
+
+// Setup global environment
 const setupGlobalEnv = () => {
-  global.Worker = MockWorker
+  global.Worker = EnhancedMockWorker
+  global.THREE = THREE
+  
+  // Basic window mock
   global.window = {
     innerWidth: VIEWPORT.width,
     innerHeight: VIEWPORT.height,
-    devicePixelRatio: 1,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    navigator: { userAgent: 'node' },
-    getComputedStyle: () => ({
-      getPropertyValue: () => ''
-    }),
-    requestAnimationFrame: () => {},
-    location: { href: '' }
+    devicePixelRatio: 1
   }
-  global.loadImage = loadImage
-  global.THREE = THREE
-  global.ImageData = ImageData
+  
+  // Basic document mock for canvas
   global.document = {
     createElement: (type) => {
-      if (type !== 'canvas') throw new Error(`Cannot create node ${type}`)
-      return createMockCanvas(VIEWPORT.width, VIEWPORT.height)
-    },
-    createElementNS: (ns, element) => document.createElement(element),
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    documentElement: {
-      style: {}
+      if (type === 'canvas') return createCanvas(VIEWPORT.width, VIEWPORT.height)
+      throw new Error(`Cannot create node ${type}`)
     }
   }
 }
 
+// Enhanced world view implementation
+class EnhancedWorldView extends PrismarineViewer.WorldView {
+  constructor(world, viewDistance, center, scene, mcData) {
+    super(world, viewDistance, center)
+    this.worker = new EnhancedMockWorker(scene, mcData)
+    this.center = center
+  }
+
+  async generateMeshes() {
+    const promises = []
+
+    // Get blocks from the current chunk
+    const chunkX = Math.floor(this.center.x / 16)
+    const chunkZ = Math.floor(this.center.z / 16)
+
+    try {
+      const blocks = []
+      
+      // Scan a reasonable volume around the center
+      const scanRange = 32 // Adjust this value based on your needs
+      
+      for (let x = -scanRange; x <= scanRange; x++) {
+        for (let y = 0; y < 256; y++) {
+          for (let z = -scanRange; z <= scanRange; z++) {
+            const worldX = this.center.x + x
+            const worldY = y
+            const worldZ = this.center.z + z
+            
+            try {
+              const block = await this.world.getBlock(new Vec3(worldX, worldY, worldZ))
+              if (block && block.type !== 0) { // Skip air blocks
+                const localChunkX = Math.floor(worldX / 16)
+                const localChunkZ = Math.floor(worldZ / 16)
+                const localX = worldX - (localChunkX * 16)
+                const localZ = worldZ - (localChunkZ * 16)
+                
+                blocks.push({
+                  chunkX: localChunkX,
+                  chunkZ: localChunkZ,
+                  type: block.type,
+                  position: [localX, worldY, localZ]
+                })
+              }
+            } catch (e) {
+              // Skip individual block errors
+              continue
+            }
+          }
+        }
+      }
+
+      // Group blocks by chunk
+      const chunkBlocks = new Map()
+      for (const block of blocks) {
+        const key = `${block.chunkX},${block.chunkZ}`
+        if (!chunkBlocks.has(key)) {
+          chunkBlocks.set(key, [])
+        }
+        chunkBlocks.get(key).push(block)
+      }
+
+      // Create meshes for each chunk
+      for (const [key, chunkBlockList] of chunkBlocks) {
+        const [chunkX, chunkZ] = key.split(',').map(Number)
+        
+        promises.push(
+          new Promise((resolve) => {
+            this.worker.postMessage({
+              type: 'add_mesh',
+              x: chunkX,
+              y: 0, // We'll handle Y position in the block positions
+              z: chunkZ,
+              blocks: chunkBlockList.map(block => ({
+                type: block.type,
+                position: block.position
+              }))
+            })
+            resolve()
+          })
+        )
+      }
+
+    } catch (e) {
+      console.warn(`Failed to process chunks around ${chunkX}, ${chunkZ}:`, e.message)
+    }
+    
+    await Promise.all(promises)
+    return promises.length
+  }
+}
+
+// Initialize renderer
 const initRenderer = () => {
   const canvas = createMockCanvas(VIEWPORT.width, VIEWPORT.height)
   const glContext = gl(VIEWPORT.width, VIEWPORT.height, {
@@ -101,34 +286,92 @@ const initRenderer = () => {
   renderer.setSize(VIEWPORT.width, VIEWPORT.height)
   renderer.setPixelRatio(1)
   renderer.shadowMap.enabled = true
-  // Updated from outputEncoding to outputColorSpace
   renderer.outputColorSpace = THREE.SRGBColorSpace
   return renderer
 }
 
+// Setup scene
+const setupScene = (viewer, size) => {
+  viewer.scene.background = new THREE.Color('#87CEEB')
+  
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
+  viewer.scene.add(ambientLight)
+
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
+  directionalLight.position.set(size.x, size.y * 1.5, size.z)
+  directionalLight.castShadow = true
+  
+  directionalLight.shadow.mapSize.width = 2048
+  directionalLight.shadow.mapSize.height = 2048
+  directionalLight.shadow.camera.near = 0.1
+  directionalLight.shadow.camera.far = 500
+  
+  viewer.scene.add(directionalLight)
+
+  const maxDimension = Math.max(size.x, size.y, size.z)
+  const cameraDistance = maxDimension * 2
+  viewer.camera.position.set(
+    size.x / 2 + cameraDistance,
+    size.y / 2 + cameraDistance / 2,
+    size.z / 2 + cameraDistance
+  )
+  viewer.camera.lookAt(size.x / 2, size.y / 2, size.z / 2)
+
+  return viewer
+}
+
+// Export GLTF
+const exportGLTF = (scene, fileName) => {
+  return new Promise((resolve, reject) => {
+    try {
+      const exporter = new GLTFExporter()
+      
+      exporter.parse(scene, async (result) => {
+        await fs.mkdir('./gltf_out', { recursive: true })
+        await fs.writeFile(
+          path.join('./gltf_out', fileName), 
+          JSON.stringify(result)
+        )
+        resolve(fileName)
+      }, 
+      (error) => reject(error),
+      {
+        binary: false,
+        onlyVisible: true,
+        includeCustomExtensions: true
+      })
+    } catch (error) {
+      reject(error)
+    }
+  })
+}
+
+
+// Initialize Minecraft modules
 const initMinecraftModules = async () => {
   const [worldModule, chunkModule, blockModule, mcDataModule] = await Promise.all([
     import('prismarine-world'),
     import('prismarine-chunk'),
     import('prismarine-block'),
-    import('minecraft-data'),
+    import('minecraft-data')
   ])
 
   return {
     World: worldModule.default(VERSION),
     Chunk: chunkModule.default(VERSION),
     Block: blockModule.default(VERSION),
-    mcData: mcDataModule.default(VERSION),
+    mcData: mcDataModule.default(VERSION)
   }
 }
 
+// Process NBT
 const processNBT = async (buffer, { World, Chunk, Block, mcData }) => {
-  // Initialize world with chunk boundaries aligned to structure size
   const world = new World(() => {
     const chunk = new Chunk()
     chunk.initialize(() => null)
     return chunk
   })
+  
   const { parsed } = await parse(buffer)
   
   const size = {
@@ -145,9 +388,11 @@ const processNBT = async (buffer, { World, Chunk, Block, mcData }) => {
 
   const palette = parsed.value.palette.value.value.map(block => ({
     type: block.Name.value,
-    properties: block.Properties ? convertToDataType(simplify(block.Properties)) : {},
+    properties: block.Properties ? simplify(block.Properties) : {},
   }))
 
+  // Group blocks by chunk
+  const chunkBlocks = new Map()
   for (const block of parsed.value.blocks.value.value) {
     const { type, properties } = palette[block.state.value]
     if (type === 'minecraft:air') continue
@@ -157,98 +402,37 @@ const processNBT = async (buffer, { World, Chunk, Block, mcData }) => {
     if (!blockRef) continue
 
     const [x, y, z] = block.pos.value.value
-    await world.setBlock(
-      new Vec3(x, y, z),
-      Block.fromProperties(blockRef.id, properties, 1)
-    )
+    const chunkX = Math.floor(x / 16)
+    const chunkZ = Math.floor(z / 16)
+    const chunkKey = `${chunkX},${chunkZ}`
+    
+    if (!chunkBlocks.has(chunkKey)) {
+      chunkBlocks.set(chunkKey, [])
+    }
+    
+    chunkBlocks.get(chunkKey).push({
+      position: new Vec3(x, y, z),
+      block: Block.fromProperties(blockRef.id, properties, 1)
+    })
+  }
+
+  // Set blocks chunk by chunk
+  for (const [key, blocks] of chunkBlocks) {
+    const [chunkX, chunkZ] = key.split(',').map(Number)
+    const chunk = new Chunk()
+    chunk.initialize(() => null)
+    
+    for (const { position, block } of blocks) {
+      const localX = position.x % 16
+      const localZ = position.z % 16
+      chunk.setBlock(new Vec3(localX, position.y, localZ), block)
+    }
+    
+    await world.setColumn(chunkX, chunkZ, chunk)
   }
 
   return { world, size }
 }
-
-const convertToDataType = (properties) => {
-  return Object.fromEntries(
-    Object.entries(properties).map(([key, value]) => [
-      key,
-      !isNaN(value) ? parseInt(value) :
-      value === 'true' ? true :
-      value === 'false' ? false :
-      value
-    ])
-  )
-}
-
-const setupScene = (viewer, size) => {
-  // Create scene background using Color constructor
-  viewer.scene.background = new THREE.Color('#87CEEB')
-  
-  // Add lighting
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
-  viewer.scene.add(ambientLight)
-
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
-  directionalLight.position.set(size.x, size.y * 1.5, size.z)
-  directionalLight.castShadow = true
-  
-  // Set up shadow properties
-  directionalLight.shadow.mapSize.width = 2048
-  directionalLight.shadow.mapSize.height = 2048
-  directionalLight.shadow.camera.near = 0.1
-  directionalLight.shadow.camera.far = 500
-  
-  viewer.scene.add(directionalLight)
-
-  // Position camera
-  const maxDimension = Math.max(size.x, size.y, size.z)
-  const cameraDistance = maxDimension * 2
-  viewer.camera.position.set(
-    size.x / 2 + cameraDistance,
-    size.y / 2 + cameraDistance / 2,
-    size.z / 2 + cameraDistance
-  )
-  viewer.camera.lookAt(size.x / 2, size.y / 2, size.z / 2)
-
-  return viewer
-}
-
-const exportGLTF = (scene, fileName) => {
-  return new Promise((resolve, reject) => {
-    const exporter = new GLTFExporter()
-    const options = {
-      binary: false,
-      onlyVisible: true,
-      maxTextureSize: 4096,
-      embedImages: true,
-      includeCustomExtensions: true,
-    }
-
-    exporter.parse(
-      scene,
-      async (gltf) => {
-        try {
-          await fs.mkdir('./gltf_out', { recursive: true })
-          await fs.writeFile(
-            path.join('./gltf_out', fileName),
-            JSON.stringify(gltf, null, 2)
-          )
-          resolve(fileName)
-        } catch (error) {
-          reject(error)
-        }
-      },
-      (error) => reject(error),
-      options
-    )
-  })
-}
-
-const generateRandomString = (length) => {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-  return Array.from({ length }, () =>
-    chars.charAt(Math.floor(Math.random() * chars.length))
-  ).join('')
-}
-
 const main = async () => {
   try {
     console.log('Setting up environment...')
@@ -257,80 +441,48 @@ const main = async () => {
     
     console.log('Initializing Minecraft modules...')
     const mcModules = await initMinecraftModules()
-
+    
     console.log('Creating viewer...')
     const viewer = new PrismarineViewer.Viewer(renderer, false)
-    const success = await viewer.setVersion(VERSION)
-    if (!success) {
-      throw new Error('Failed to set version - block states may not be loaded')
-    }
-    console.log('Version set successfully, block states loaded')
+    await viewer.setVersion(VERSION)
     
-    // Wait for textures and block states to fully load
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    
-    // Debug texture loading
-    if (!viewer.world || !viewer.world.material || !viewer.world.material.map) {
-      console.log('Warning: Textures not loaded properly')
-    } else {
-      console.log('Textures loaded successfully')
-    }
-
     console.log('Reading NBT file...')
     const buffer = await fs.readFile('./public/my_awesome_house.nbt')
-    const { parsed } = await parse(buffer)
     const { world, size } = await processNBT(buffer, mcModules)
     
-    // Debug block loading
-    console.log('Structure size:', size)
-    const blockCount = parsed.value.blocks.value.value.length
-    console.log('Total blocks in NBT:', blockCount)
-
-    console.log('Setting up world view...')
-    const worldView = new PrismarineViewer.WorldView(
-      world,
-      VIEWPORT.viewDistance,
-      VIEWPORT.center
+    // Calculate the center based on the size
+    const center = new Vec3(
+      Math.floor(size.x / 2),
+      Math.floor(size.y / 2),
+      Math.floor(size.z / 2)
     )
-    await worldView.init(VIEWPORT.center)
-    viewer.listen(worldView)
     
-    // Debug world loading
-    console.log('World center:', VIEWPORT.center)
-    console.log('Loaded chunks:', Object.keys(worldView.loadedChunks).length)
-    console.log('World view chunks:', Object.keys(worldView.world.columns).length)
-
-    console.log('Waiting for chunks and textures...')
-    await worldView.updatePosition(VIEWPORT.center, true) // Force update
-    await viewer.waitForChunksToRender()
-    await worldView.updatePosition(VIEWPORT.center, true) // Second update to ensure chunks are loaded
-    
-    // Wait for worker to generate meshes
-    console.log('Waiting for mesh generation...')
-    console.log('Viewer world:', !!viewer.world)
-    console.log('Section meshes:', viewer.world ? Object.keys(viewer.world.sectionMeshs).length : 0)
-    console.log('Worker state:', viewer.world ? !!viewer.world.worker : false)
-    await new Promise(resolve => setTimeout(resolve, 3000))
-    await viewer.world.waitForChunksToRender()
-    
-    // Verify meshes were generated
-    const meshCount = viewer.scene.children.filter(c => c.isMesh).length
-    console.log('Generated meshes:', meshCount)
-    console.log('Section meshes after wait:', viewer.world ? Object.keys(viewer.world.sectionMeshs).length : 0)
-    if (meshCount === 0) {
-      throw new Error('No meshes were generated - check world loading and chunk rendering')
-    }
-
     console.log('Setting up scene...')
     setupScene(viewer, size)
+    
+    console.log('Setting up world view...')
+    const worldView = new EnhancedWorldView(
+      world,
+      VIEWPORT.viewDistance,
+      center,
+      viewer.scene,
+      mcModules.mcData
+    )
+    await worldView.init(center)
+    viewer.listen(worldView)
+    
+    console.log('Generating meshes...')
+    const meshCount = await worldView.generateMeshes()
+    console.log(`Generated ${meshCount} meshes`)
+    
+    // Give time for all meshes to be added to the scene
+    await new Promise(resolve => setTimeout(resolve, 3000))
+    
+    // Render the scene
     renderer.render(viewer.scene, viewer.camera)
-
-    console.log('Exporting to GLTF...');
-    console.log('Scene children:', viewer.scene.children.length);
-    console.log('Scene meshes:', viewer.scene.children.filter(c => c instanceof THREE.Mesh).length);
-
+    
     console.log('Exporting to GLTF...')
-    const fileName = `${generateRandomString(20)}.gltf`
+    const fileName = `minecraft_structure_${Date.now()}.gltf`
     await exportGLTF(viewer.scene, fileName)
     
     console.log(`Successfully exported to: ./gltf_out/${fileName}`)
@@ -341,5 +493,4 @@ const main = async () => {
     process.exit(1)
   }
 }
-
 main()

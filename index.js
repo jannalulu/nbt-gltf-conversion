@@ -146,42 +146,119 @@ class EnhancedMockWorker {
       return new THREE.MeshStandardMaterial({ color: 0x808080 })
     }
 
-    // Try to find the texture in various ways
-    const textureName = block.name
-    console.log(`Looking for texture: ${textureName}`, {
-      blockName: block.name,
-      hasMapping: !!this.uvMapping[textureName],
-      availableMappings: Object.keys(this.uvMapping).slice(0, 5) // Show first 5 for debugging
-    })
+    // Special case texture mappings
+    const textureMapping = {
+      // Wood variants
+      'oak_stairs': 'oak_planks',
+      'dark_oak_stairs': 'dark_oak_planks',
+      'birch_stairs': 'birch_planks',
+      'spruce_stairs': 'spruce_planks',
+      'jungle_stairs': 'jungle_planks',
+      'acacia_stairs': 'acacia_planks',
+      
+      // Grass and dirt
+      'grass_block': ['grass_block_side', 'grass_block_top', 'dirt'],
+      'dirt_path': ['dirt_path_side', 'dirt_path_top'],
+      
+      // Beds
+      'red_bed': ['red_bed_head_side', 'red_bed_head_top'],
+      'black_bed': ['black_bed_head_side', 'black_bed_head_top'],
+      'blue_bed': ['blue_bed_head_side', 'blue_bed_head_top'],
+      'brown_bed': ['brown_bed_head_side', 'brown_bed_head_top'],
+      'cyan_bed': ['cyan_bed_head_side', 'cyan_bed_head_top'],
+      'gray_bed': ['gray_bed_head_side', 'gray_bed_head_top'],
+      'green_bed': ['green_bed_head_side', 'green_bed_head_top'],
+      'light_blue_bed': ['light_blue_bed_head_side', 'light_blue_bed_head_top'],
+      'light_gray_bed': ['light_gray_bed_head_side', 'light_gray_bed_head_top'],
+      'lime_bed': ['lime_bed_head_side', 'lime_bed_head_top'],
+      'magenta_bed': ['magenta_bed_head_side', 'magenta_bed_head_top'],
+      'orange_bed': ['orange_bed_head_side', 'orange_bed_head_top'],
+      'pink_bed': ['pink_bed_head_side', 'pink_bed_head_top'],
+      'purple_bed': ['purple_bed_head_side', 'purple_bed_head_top'],
+      'white_bed': ['white_bed_head_side', 'white_bed_head_top'],
+      'yellow_bed': ['yellow_bed_head_side', 'yellow_bed_head_top'],
 
-    const uvs = this.uvMapping[textureName] || this.uvMapping[`${textureName}_top`] || this.uvMapping[`${block.name}`]
-    
-    if (!uvs) {
-      console.warn(`No UV mapping found for texture ${textureName}`)
-      return new THREE.MeshStandardMaterial({ color: 0xcccccc })
+      // Stone variants
+      'stone_stairs': 'stone',
+      'cobblestone_stairs': 'cobblestone',
+      'mossy_cobblestone_stairs': 'mossy_cobblestone',
+      'stone_brick_stairs': 'stone_bricks',
+      'mossy_stone_brick_stairs': 'mossy_stone_bricks',
+      
+      // Other materials
+      'sandstone_stairs': ['sandstone_top', 'sandstone_side'],
+      'smooth_sandstone_stairs': 'sandstone_top',
+      'brick_stairs': 'bricks',
+      'nether_brick_stairs': 'nether_bricks',
+      'quartz_stairs': ['quartz_block_top', 'quartz_block_side'],
+      'prismarine_stairs': 'prismarine',
+      'prismarine_brick_stairs': 'prismarine_bricks'
     }
 
-    // Create new material with texture
+    // Get all possible texture names for this block
+    let possibleTextures = textureMapping[block.name] || [block.name];
+    if (!Array.isArray(possibleTextures)) {
+      possibleTextures = [possibleTextures];
+    }
+
+    // Try to find a valid texture from the possible options
+    let uvs = null;
+    let usedTexture = null;
+
+    for (const textureName of possibleTextures) {
+      // Try different variations of the texture name
+      const variations = [
+        textureName,
+        `${textureName}_side`,
+        `${textureName}_top`,
+        `${textureName}_bottom`,
+        textureName.replace('block_', '')  // Try without 'block_' prefix
+      ];
+
+      for (const variant of variations) {
+        if (this.uvMapping[variant]) {
+          uvs = this.uvMapping[variant];
+          usedTexture = variant;
+          break;
+        }
+      }
+
+      if (uvs) break;
+    }
+
+    console.log(`Looking for texture: ${block.name}`, {
+      blockName: block.name,
+      possibleTextures,
+      foundTexture: usedTexture,
+      hasMapping: !!uvs,
+      availableMappings: Object.keys(this.uvMapping).slice(0, 5)
+    });
+
+    if (!uvs) {
+      console.warn(`No UV mapping found for ${block.name} with textures:`, possibleTextures);
+      return new THREE.MeshStandardMaterial({ color: 0xcccccc });
+    }
+
+    // Create material with texture
     const material = new THREE.MeshStandardMaterial({
-      map: this.atlas.clone(), // Clone the texture
+      map: this.atlas.clone(),
       roughness: 1.0,
       metalness: 0.0,
       transparent: false,
       side: THREE.FrontSide
-    })
+    });
 
-    // Set up UV mapping
-    material.map.repeat.set(uvs.width, uvs.height)
-    material.map.offset.set(uvs.x, uvs.y)
-    material.map.needsUpdate = true
-    
+    material.map.repeat.set(uvs.width, uvs.height);
+    material.map.offset.set(uvs.x, uvs.y);
+    material.map.needsUpdate = true;
+
     console.log(`Created material for ${block.name}`, {
+      usedTexture,
       hasTexture: !!material.map,
-      uvs: uvs,
-      textureSize: this.atlas.image.width
-    })
+      uvs: uvs
+    });
 
-    return material
+    return material;
 }
 
 addMesh(data) {
@@ -385,7 +462,7 @@ const initRenderer = () => {
 const setupScene = (viewer, size) => {
   viewer.scene.background = new THREE.Color('#87CEEB')
   
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.5)
   viewer.scene.add(ambientLight)
 
   const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
@@ -836,7 +913,7 @@ const main = async () => {
         hasAtlas: !!textureAtlas,
         textureValid: !!textureAtlas?.image
       })
-      
+
       console.log('Debug: World state:', {
         version: VERSION,
         hasBlockStates: !!viewer.world.blockStates,

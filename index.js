@@ -5,12 +5,15 @@ import gl from 'gl'
 import { promises as fs } from 'fs'
 import { Vec3 } from 'vec3'
 import prismarineViewer from 'prismarine-viewer'
-const { viewer: PrismarineViewer } = prismarineViewer
 import { parse, simplify } from 'prismarine-nbt'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
+import prismarineBlock from 'prismarine-block'
+import mcAssets from 'minecraft-assets'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { Blob, FileReader } from 'vblob'
+import { createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
 
 // Polyfills for GLTF export and canvas
 global.Blob = Blob
@@ -19,6 +22,7 @@ global.ImageData = ImageData
 global.Image = loadImage
 global.performance = { now: () => Date.now() }
 
+const { viewer: PrismarineViewer } = prismarineViewer
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const VERSION = '1.20.1'
@@ -97,7 +101,7 @@ class EnhancedMockWorker {
   setAtlas(atlas) {
     this.atlas = atlas
   }
-
+  
   loadTexture() {
     if (!this.atlas) {
       const texture = new THREE.DataTexture(
@@ -146,30 +150,47 @@ class EnhancedMockWorker {
   processMessage(data) {
     if (data.type === 'add_mesh') {
       const { x, z, blocks } = data
-      console.log('Debug: Processing blocks:', blocks)
       
+      // Group blocks by type for batch processing
+      const blocksByType = new Map()
       for (const block of blocks) {
-        if (!block || !block.position || block.type === 0) continue // Skip invalid blocks or air blocks
-        
-        const [posX, posY, posZ] = block.position
-        if (posX === undefined || posY === undefined || posZ === undefined) continue // Skip invalid positions
-        
+        if (!block || !block.position || block.type === 0) continue
+        if (!blocksByType.has(block.type)) {
+          blocksByType.set(block.type, [])
+        }
+        blocksByType.get(block.type).push(block)
+      }
+
+      // Process each block type
+      for (const [blockType, typeBlocks] of blocksByType) {
+        const blockName = this.mcData.blocks[blockType]?.name
+        if (!blockName) continue
+
+        // Create geometry for the block type
         const geometry = new THREE.BoxGeometry(1, 1, 1)
-        const material = this.createMaterial(block.type)
-        
-        const mesh = new THREE.Mesh(geometry, material)
-        mesh.position.set(
-          x * 16 + posX,
-          posY,
-          z * 16 + posZ
+        const material = this.createMaterial(blockType)
+
+        // Create instanced mesh for better performance
+        const instancedMesh = new THREE.InstancedMesh(
+          geometry,
+          material,
+          typeBlocks.length
         )
-        
-        mesh.castShadow = true
-        mesh.receiveShadow = true
-        
-        const key = `${x},${block.position[1]},${z},${block.position.join(',')}`
-        this.meshes.set(key, mesh)
-        this.scene.add(mesh)
+
+        // Set positions for each instance
+        const matrix = new THREE.Matrix4()
+        typeBlocks.forEach((block, index) => {
+          matrix.setPosition(
+            x * 16 + block.position[0],
+            block.position[1],
+            z * 16 + block.position[2]
+          )
+          instancedMesh.setMatrixAt(index, matrix)
+        })
+
+        instancedMesh.castShadow = true
+        instancedMesh.receiveShadow = true
+        this.scene.add(instancedMesh)
       }
     }
   }
@@ -482,32 +503,148 @@ const processNBT = async (buffer, { World, Chunk, Block, mcData }) => {
 
   return { world, size }
 }
+
+const createTextureAtlas = async (assets) => {
+  console.log('Debug assets:', {
+    hasAssets: !!assets,
+    directory: assets?.directory,
+    textureCount: assets?.textureContent ? Object.keys(assets.textureContent).length : 0
+  });
+
+  const atlasCanvas = createCanvas(1024, 1024)
+  const ctx = atlasCanvas.getContext('2d')
+  const textures = {}
+
+  let x = 0
+  let y = 0
+  const size = 16  // texture size
+  const rowHeight = size
+
+  try {
+    console.log('Creating atlas from directory:', assets.directory);
+    const textureFiles = await fs.readdir(path.join(assets.directory, 'blocks'))
+    console.log('Found texture files:', textureFiles.length);
+
+    for (const file of textureFiles) {
+      if (!file.endsWith('.png')) continue;
+      
+      try {
+        const textureName = path.basename(file, '.png')
+        const imagePath = path.join(assets.directory, 'blocks', file)
+        
+        const image = await loadImage(imagePath)
+        ctx.drawImage(image, x, y, size, size)
+        
+        textures[textureName] = {
+          x: x / atlasCanvas.width,
+          y: y / atlasCanvas.height,
+          width: size / atlasCanvas.width,
+          height: size / atlasCanvas.height
+        }
+        
+        x += size
+        if (x + size > atlasCanvas.width) {
+          x = 0
+          y += rowHeight
+        }
+      } catch (error) {
+        console.warn('Error processing texture file:', file, error);
+        continue;
+      }
+    }
+
+    const atlas = new THREE.CanvasTexture(atlasCanvas)
+    atlas.magFilter = THREE.NearestFilter
+    atlas.minFilter = THREE.NearestFilter
+    atlas.needsUpdate = true
+    
+    return { textureAtlas: atlas, textures }
+
+  } catch (error) {
+    console.error('Error in texture atlas creation:', error);
+    // Create a default texture atlas as fallback
+    const defaultAtlas = new THREE.CanvasTexture(atlasCanvas)
+    defaultAtlas.magFilter = THREE.NearestFilter
+    defaultAtlas.minFilter = THREE.NearestFilter
+    defaultAtlas.needsUpdate = true
+    return { 
+      textureAtlas: defaultAtlas, 
+      textures: {} 
+    }
+  }
+}
+
 const main = async () => {
   try {
     console.log('Setting up environment...')
     setupGlobalEnv()
+    
+    console.log('Initializing renderer...')
     const renderer = initRenderer()
     
     console.log('Initializing Minecraft modules...')
     const mcModules = await initMinecraftModules()
+    console.log('Minecraft modules initialized:', Object.keys(mcModules))
     
     console.log('Creating viewer...')
     const viewer = new PrismarineViewer.Viewer(renderer, false)    
+    
+    console.log('Setting version...')
     if (!await viewer.setVersion(VERSION)) {
       throw new Error('Failed to set version')
     }
-    await viewer.world.updateTexturesData() // Initialize texture atlas
-    console.log('Debug: Viewer world:', {
-      worldRenderer: viewer.world?.constructor?.name,
-      worldKeys: Object.keys(viewer.world || {}),
-      hasWorker: !!viewer.world?.worker
+    console.log('Version set successfully')
+
+    console.log('Reading NBT file...')
+    const buffer = await fs.readFile('./public/my_awesome_house.nbt')
+    console.log('NBT file read successfully, size:', buffer.length)
+
+    // Load Minecraft assets
+    console.log('Loading Minecraft assets...')
+    const assets = mcAssets(VERSION)
+    console.log('Assets loaded:', {
+      version: VERSION,
+      directory: assets?.directory,
+      exists: !!assets
     })
+
+    // Create and set up texture atlas
+    console.log('Creating texture atlas...')
+    let textureAtlas, textureMapping;
+    try {
+      const atlasResult = await createTextureAtlas(assets)
+      textureAtlas = atlasResult.textureAtlas;
+      textureMapping = atlasResult.textures;
+      console.log('Texture atlas created with', Object.keys(textureMapping).length, 'textures')
+      
+      viewer.world.textureAtlas = textureAtlas
+      viewer.world.textureUvMap = textureMapping
+      viewer.world.blockType = mcModules.Block 
+      viewer.world.material.map = textureAtlas
+      viewer.world.material.needsUpdate = true
+    } catch (error) {
+      console.error('Failed to create texture atlas:', error)
+      throw error
+    }
+
+    // Update block states and textures
+    console.log('Updating block states and textures...')
+    viewer.world.blockStates = mcModules.mcData.blockStates
+    viewer.world.blocksTextures = textureMapping
+
+    console.log('Debug: World state:', {
+      version: VERSION,
+      hasBlockStates: !!viewer.world?.blockStates,
+      hasTextures: !!viewer.world?.textures,
+      hasTextureAtlas: !!viewer.world?.textureAtlas,
+      textureCount: Object.keys(textureMapping).length
+    })
+    
     console.log('Debug: After setVersion:', {
       version: VERSION,
       hasBlockStates: !!viewer.world?.blockStates,
       hasTextures: !!viewer.world?.textures
     })
-    await viewer.world.updateTexturesData() // Initialize texture atlas
     console.log('Debug: Viewer world after texture update:', {
       hasWorld: !!viewer.world,
       hasAtlas: !!viewer.world?.atlas,
@@ -515,9 +652,9 @@ const main = async () => {
       worldKeys: Object.keys(viewer.world || {})
     })
     
-    console.log('Reading NBT file...')
-    const buffer = await fs.readFile('./public/my_awesome_house.nbt')
+    console.log('Processing NBT data...')
     const { world, size } = await processNBT(buffer, mcModules)
+    console.log('NBT data processed. Structure size:', size)
     
     // Calculate the center based on the size
     const center = new Vec3(
@@ -525,6 +662,7 @@ const main = async () => {
       Math.floor(size.y / 2),
       Math.floor(size.z / 2)
     )
+    console.log('Center calculated:', center)
     
     console.log('Setting up scene...')
     setupScene(viewer, size)
@@ -537,19 +675,21 @@ const main = async () => {
       viewer.scene,
       mcModules.mcData
     )
+
+    // Set the atlas for the EnhancedMockWorker
+    worldView.worker.setAtlas(textureAtlas)
+
     await worldView.init(center)
     viewer.listen(worldView)
     
     console.log('Generating meshes...')
-    console.log('Debug: Checking block data before mesh generation...')
     const meshCount = await worldView.generateMeshes()
-    // console.log(`Generated ${meshCount} meshes`)
+    console.log('Meshes generated:', meshCount)
     
-    // Give time for all meshes to be added to the scene
     console.log('Waiting for meshes...')
     await new Promise(resolve => setTimeout(resolve, 5000))
     
-    // Render the scene
+    // Render and export
     const fileName = `minecraft_structure_${Date.now()}.gltf`
     
     try {
@@ -558,8 +698,7 @@ const main = async () => {
       console.log('Render complete')
       
       console.log('Starting GLTF export...')
-      // Export texture atlas
-      console.log('Debug: Checking texture atlas...')
+      console.log('Debug: Checking texture atlas state:')
       console.log('viewer.world:', viewer.world ? 'exists' : 'missing')
       console.log('viewer.world.textureAtlas:', viewer.world?.textureAtlas ? 'exists' : 'missing')
       console.log('viewer.world.atlas:', viewer.world?.atlas ? 'exists' : 'missing')
@@ -567,30 +706,37 @@ const main = async () => {
       // Ensure output directory exists
       await fs.mkdir('./gltf_out', { recursive: true })
       
-      // Save texture atlas from prismarine-viewer
-      const textureAtlasPath = path.join('node_modules', 'minecraft-data', 'minecraft-data', 'data', VERSION, 'blocks')
-      try {
-        await fs.access(textureAtlasPath)
-        await fs.copyFile(path.join(textureAtlasPath, 'atlas.png'), path.join('./gltf_out', 'atlas.png'))
-      } catch (e) {
-        console.warn('Could not find texture atlas:', e)
+      // Save texture atlas
+      if (viewer.world.textureAtlas?.image) {
+        console.log('Saving texture atlas...')
+        const textureAtlasCanvas = viewer.world.textureAtlas.image
+        const stream = textureAtlasCanvas.createPNGStream()
+        const outputPath = path.join('./gltf_out', 'atlas.png')
+        
+        await pipeline(
+          stream,
+          createWriteStream(outputPath)
+        )
+        
+        console.log('Texture atlas saved')
+      } else {
+        console.warn('No texture atlas image found to save')
       }
       
-      await exportGLTF(viewer.scene, fileName).catch(error => {
-        console.error('GLTF export error:', error)
-        throw error
-      })
+      console.log('Exporting GLTF...')
+      await exportGLTF(viewer.scene, fileName)
       
       console.log(`Successfully exported to: ./gltf_out/${fileName}`)
-      console.log('Texture atlas exported as atlas.png')
+      console.log('Export complete')
     } catch (error) {
       console.error('Error during render/export:', error)
       throw error
     }
+    
     process.exit(0)
   } catch (error) {
-    console.error('Error:', error)
-    console.error(error.stack)
+    console.error('Error in main:', error)
+    console.error('Stack trace:', error.stack)
     process.exit(1)
   }
 }

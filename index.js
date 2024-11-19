@@ -12,9 +12,12 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { Blob, FileReader } from 'vblob'
 
-// Polyfill for GLTF export
+// Polyfills for GLTF export and canvas
 global.Blob = Blob
-global.FileReader = FileReader 
+global.FileReader = FileReader
+global.ImageData = ImageData
+global.Image = loadImage
+global.performance = { now: () => Date.now() }
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -86,6 +89,29 @@ class EnhancedMockWorker {
     this.scene = scene
     this.mcData = mcData
     this.meshes = new Map()
+    this.textureLoader = new THREE.TextureLoader()
+    this.textureCache = {}
+    this.atlas = null
+  }
+
+  setAtlas(atlas) {
+    this.atlas = atlas
+  }
+
+  loadTexture() {
+    if (!this.atlas) {
+      const texture = new THREE.DataTexture(
+        new Uint8Array([128, 128, 128]), // Gray color
+        1,
+        1,
+        THREE.RGBFormat
+      )
+      texture.magFilter = THREE.NearestFilter
+      texture.minFilter = THREE.NearestFilter
+      texture.needsUpdate = true
+      return texture
+    }
+    return this.atlas
   }
 
   getBlockTexture(blockId) {
@@ -106,25 +132,36 @@ class EnhancedMockWorker {
     return firstTexture
   }
 
-  async processMessage(data) {
+  createMaterial(blockId) {
+    const material = new THREE.MeshStandardMaterial({
+      roughness: 0.8,
+      metalness: 0.2,
+      map: this.loadTexture(),
+      transparent: true,
+      alphaTest: 0.1
+    })
+    return material
+  }
+
+  processMessage(data) {
     if (data.type === 'add_mesh') {
       const { x, z, blocks } = data
+      console.log('Debug: Processing blocks:', blocks)
       
       for (const block of blocks) {
-        if (block.type === 0) continue // Skip air blocks
+        if (!block || !block.position || block.type === 0) continue // Skip invalid blocks or air blocks
+        
+        const [posX, posY, posZ] = block.position
+        if (posX === undefined || posY === undefined || posZ === undefined) continue // Skip invalid positions
         
         const geometry = new THREE.BoxGeometry(1, 1, 1)
-        const material = new THREE.MeshStandardMaterial({ 
-          roughness: 0.8,
-          metalness: 0.2,
-          color: 0xAAAAAA
-        })
+        const material = this.createMaterial(block.type)
         
         const mesh = new THREE.Mesh(geometry, material)
         mesh.position.set(
-          x * 16 + block.position[0],
-          block.position[1],
-          z * 16 + block.position[2]
+          x * 16 + posX,
+          posY,
+          z * 16 + posZ
         )
         
         mesh.castShadow = true
@@ -220,7 +257,7 @@ class EnhancedWorldView extends PrismarineViewer.WorldView {
                   chunkX: localChunkX,
                   chunkZ: localChunkZ,
                   type: block.type,
-                  position: [localX, worldY, localZ]
+                  position: [parseInt(localX), parseInt(worldY), parseInt(localZ)]
                 })
               }
             } catch (e) {
@@ -455,8 +492,28 @@ const main = async () => {
     const mcModules = await initMinecraftModules()
     
     console.log('Creating viewer...')
-    const viewer = new PrismarineViewer.Viewer(renderer, false)
-    await viewer.setVersion(VERSION)
+    const viewer = new PrismarineViewer.Viewer(renderer, false)    
+    if (!await viewer.setVersion(VERSION)) {
+      throw new Error('Failed to set version')
+    }
+    await viewer.world.updateTexturesData() // Initialize texture atlas
+    console.log('Debug: Viewer world:', {
+      worldRenderer: viewer.world?.constructor?.name,
+      worldKeys: Object.keys(viewer.world || {}),
+      hasWorker: !!viewer.world?.worker
+    })
+    console.log('Debug: After setVersion:', {
+      version: VERSION,
+      hasBlockStates: !!viewer.world?.blockStates,
+      hasTextures: !!viewer.world?.textures
+    })
+    await viewer.world.updateTexturesData() // Initialize texture atlas
+    console.log('Debug: Viewer world after texture update:', {
+      hasWorld: !!viewer.world,
+      hasAtlas: !!viewer.world?.atlas,
+      hasTextureAtlas: !!viewer.world?.textureAtlas,
+      worldKeys: Object.keys(viewer.world || {})
+    })
     
     console.log('Reading NBT file...')
     const buffer = await fs.readFile('./public/my_awesome_house.nbt')
@@ -484,8 +541,9 @@ const main = async () => {
     viewer.listen(worldView)
     
     console.log('Generating meshes...')
+    console.log('Debug: Checking block data before mesh generation...')
     const meshCount = await worldView.generateMeshes()
-    console.log(`Generated ${meshCount} meshes`)
+    // console.log(`Generated ${meshCount} meshes`)
     
     // Give time for all meshes to be added to the scene
     console.log('Waiting for meshes...')
@@ -500,12 +558,31 @@ const main = async () => {
       console.log('Render complete')
       
       console.log('Starting GLTF export...')
+      // Export texture atlas
+      console.log('Debug: Checking texture atlas...')
+      console.log('viewer.world:', viewer.world ? 'exists' : 'missing')
+      console.log('viewer.world.textureAtlas:', viewer.world?.textureAtlas ? 'exists' : 'missing')
+      console.log('viewer.world.atlas:', viewer.world?.atlas ? 'exists' : 'missing')
+      
+      // Ensure output directory exists
+      await fs.mkdir('./gltf_out', { recursive: true })
+      
+      // Save texture atlas from prismarine-viewer
+      const textureAtlasPath = path.join('node_modules', 'minecraft-data', 'minecraft-data', 'data', VERSION, 'blocks')
+      try {
+        await fs.access(textureAtlasPath)
+        await fs.copyFile(path.join(textureAtlasPath, 'atlas.png'), path.join('./gltf_out', 'atlas.png'))
+      } catch (e) {
+        console.warn('Could not find texture atlas:', e)
+      }
+      
       await exportGLTF(viewer.scene, fileName).catch(error => {
         console.error('GLTF export error:', error)
         throw error
       })
       
       console.log(`Successfully exported to: ./gltf_out/${fileName}`)
+      console.log('Texture atlas exported as atlas.png')
     } catch (error) {
       console.error('Error during render/export:', error)
       throw error

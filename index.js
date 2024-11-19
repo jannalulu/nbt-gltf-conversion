@@ -7,13 +7,10 @@ import { Vec3 } from 'vec3'
 import prismarineViewer from 'prismarine-viewer'
 import { parse, simplify } from 'prismarine-nbt'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
-import prismarineBlock from 'prismarine-block'
 import mcAssets from 'minecraft-assets'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { Blob, FileReader } from 'vblob'
-import { createWriteStream } from 'fs';
-import { pipeline } from 'stream/promises';
 
 // Polyfills for GLTF export and canvas
 global.Blob = Blob
@@ -22,9 +19,6 @@ global.ImageData = ImageData
 global.Image = loadImage
 global.performance = { now: () => Date.now() }
 
-const { viewer: PrismarineViewer } = prismarineViewer
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
 const VERSION = '1.20.2'
 const VIEWPORT = {
   width: 1024,
@@ -631,11 +625,18 @@ const createTextureAtlas = async (assets) => {
           continue
         }
 
+        const isItem = entry.texture.includes('items/')
+        const baseDir = isItem ? 'items' : 'blocks'
+
         const texturePath = entry.texture
           .replace('minecraft:blocks/', '')
+          .replace('minecraft:items/', '')
           .replace('blocks/', '')
+          .replace('items/', '')
+
         const blockName = entry.name
-        const fullTexturePath = path.join(assets.directory, 'blocks', `${texturePath}.png`)
+        // Use the appropriate directory in the path
+        const fullTexturePath = path.join(assets.directory, baseDir, `${texturePath}.png`)
         
         try {
           const image = await loadImage(fullTexturePath)
@@ -651,8 +652,6 @@ const createTextureAtlas = async (assets) => {
             height: TEXTURE_SIZE / ATLAS_SIZE
           }
 
-          console.log(`Successfully processed texture for ${blockName}`)
-
           // Move to next position
           x += TEXTURE_SIZE
           if (x + TEXTURE_SIZE > ATLAS_SIZE) {
@@ -665,9 +664,6 @@ const createTextureAtlas = async (assets) => {
           }
 
           processedCount++
-          if (processedCount % 50 === 0) {
-            console.log(`Processed ${processedCount} textures...`)
-          }
 
         } catch (error) {
           console.warn(`Failed to load texture for ${blockName} at ${fullTexturePath}`)
@@ -676,15 +672,6 @@ const createTextureAtlas = async (assets) => {
         console.warn(`Failed to process texture entry:`, error)
       }
     }
-
-    // Debug output for specific blocks
-    const blocksToCheck = ['granite', 'stone_bricks', 'oak_planks', 'dirt']
-    console.log('Checking specific blocks:', blocksToCheck.map(name => ({
-      name,
-      hasMapping: name in uvMapping,
-      textureInfo: textureArray.find(entry => entry.name === name),
-      texturePath: textureArray.find(entry => entry.name === name)?.texture
-    })))
 
     console.log('Texture processing complete:', {
       processedCount,
@@ -706,16 +693,6 @@ const createTextureAtlas = async (assets) => {
       textureSize: TEXTURE_SIZE,
       atlasSize: { width: ATLAS_SIZE, height: ATLAS_SIZE }
     }
-
-    // Save atlas for debugging
-    const atlasStream = atlasCanvas.createPNGStream()
-    const atlasOutputPath = path.join('./gltf_out', 'texture_atlas_debug.png')
-    await fs.mkdir('./gltf_out', { recursive: true })
-    await pipeline(
-      atlasStream,
-      createWriteStream(atlasOutputPath)
-    )
-    console.log(`Saved texture atlas to ${atlasOutputPath}`)
 
     // Create block states
     const blockStates = {}
@@ -748,24 +725,6 @@ const createTextureAtlas = async (assets) => {
     console.error('Error in texture atlas creation:', error)
     throw error
   }
-}
-
-// Helper to sanitize image data
-function sanitizeBase64(data) {
-  // Remove any data URL prefix if present
-  let base64 = data.replace(/^data:image\/\w+;base64,/, '')
-  // Remove any whitespace
-  base64 = base64.replace(/\s/g, '')
-  return base64
-}
-
-// Helper function to resolve texture references
-const resolveTextureRef = (textureRef, modelData) => {
-  if (!textureRef.startsWith('#')) return textureRef
-  
-  // Handle texture variable references
-  const varName = textureRef.substring(1)
-  return modelData.textures[varName] || textureRef
 }
 
 const main = async () => {

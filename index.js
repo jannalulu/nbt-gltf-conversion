@@ -107,8 +107,7 @@ class EnhancedMockWorker {
     console.log('Atlas set with:', {
       hasAtlas: !!atlas,
       mappingCount: Object.keys(uvMapping).length,
-      statesCount: Object.keys(blockStates || {}).length,
-      sampleMappings: Object.keys(uvMapping).slice(0, 5)
+      statesCount: Object.keys(blockStates || {}).length
     })
   }
 
@@ -210,8 +209,6 @@ class EnhancedMockWorker {
         console.warn(`Unknown block type: ${blockType}`)
         continue
       }
-
-      console.log(`Processing block type: ${blockName} (${typeBlocks.length} instances)`)
 
       // Create geometry with proper face orientation
       const geometry = new THREE.BoxGeometry(1, 1, 1)
@@ -596,14 +593,6 @@ const createTextureAtlas = async (assets) => {
     // Load block textures JSON as an array
     const blocksTexturesPath = path.join(assets.directory, 'blocks_textures.json')
     const textureArray = JSON.parse(await fs.readFile(blocksTexturesPath, 'utf8'))
-    
-    console.log('Loaded texture data:', {
-      count: textureArray.length,
-      sampleEntries: textureArray.slice(0, 3)
-    })
-
-    // Debug: List the contents of the assets directory
-    console.log('Assets directory contents:', await fs.readdir(assets.directory))
 
     const ATLAS_SIZE = 2048
     const TEXTURE_SIZE = 16
@@ -675,8 +664,7 @@ const createTextureAtlas = async (assets) => {
 
     console.log('Texture processing complete:', {
       processedCount,
-      mappingCount: Object.keys(uvMapping).length,
-      sampleMappings: Object.keys(uvMapping).slice(0, 5)
+      mappingCount: Object.keys(uvMapping).length
     })
 
     // Create Three.js texture
@@ -729,17 +717,13 @@ const createTextureAtlas = async (assets) => {
 
 const main = async () => {
   try {
-    console.log('Setting up environment...')
-    setupGlobalEnv()
+    setupGlobalEnv() // start environment
     
-    console.log('Initializing renderer...')
-    const renderer = initRenderer()
+    const renderer = initRenderer() // initialize rendering
     
     console.log('Initializing Minecraft modules...')
     const mcModules = await initMinecraftModules()
-    console.log('Minecraft modules initialized:', Object.keys(mcModules))
     
-    console.log('Creating viewer...')
     const viewer = {
       scene: new THREE.Scene(),
       camera: new THREE.PerspectiveCamera(75, VIEWPORT.width / VIEWPORT.height, 0.1, 1000),
@@ -758,33 +742,19 @@ const main = async () => {
         return true
       },
       listen: (worldView) => {
-        // Add any necessary event listeners here
       }
     }
 
-    console.log('Setting version...')
     if (!await viewer.setVersion(VERSION)) {
       throw new Error('Failed to set version')
     }
-    console.log('Version set successfully')
 
     console.log('Reading NBT file...')
     const buffer = await fs.readFile('./public/my_awesome_house.nbt')
-    console.log('NBT file read successfully, size:', buffer.length)
 
     // Load Minecraft assets
-    console.log('Loading Minecraft assets...')
     const assets = mcAssets(VERSION)
-    console.log('Assets loaded:', {
-      version: VERSION,
-      directory: assets?.directory,
-      exists: !!assets
-    })
-
-    console.log('Creating texture atlas...')
     const { atlas, uvMapping, blockStates } = await createTextureAtlas(assets)
-    
-    console.log('Processing NBT data...')
     const { world, size } = await processNBT(buffer, mcModules)
     console.log('NBT data processed. Structure size:', size)
     
@@ -793,12 +763,8 @@ const main = async () => {
       Math.floor(size.y / 2),
       Math.floor(size.z / 2)
     )
-    console.log('Center calculated:', center)
-    
-    console.log('Setting up scene...')
     setupScene(viewer, size)
     
-    console.log('Setting up world view...')
     const worldView = new EnhancedWorldView(
       world,
       VIEWPORT.viewDistance,
@@ -817,18 +783,15 @@ const main = async () => {
     const meshCount = await worldView.generateMeshes()
     console.log('Meshes generated:', meshCount)
     
-    console.log('Waiting for meshes...')
     await new Promise(resolve => setTimeout(resolve, 5000))
     
     // Render and export
-    const fileName = `minecraft_structure_${Date.now()}.gltf`
+    const fileName = `structure_${Date.now()}.gltf`
     
     try {
-      console.log('Starting render...')
       renderer.render(viewer.scene, viewer.camera)
       console.log('Render complete')
       
-      console.log('Starting GLTF export...')
       await exportGLTF(viewer.scene, fileName)
       console.log(`Successfully exported to: ./gltf_out/${fileName}`)
       

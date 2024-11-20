@@ -454,7 +454,6 @@ const exportGLTF = (scene, fileName) => {
   })
 }
 
-
 // Initialize Minecraft modules
 const initMinecraftModules = async () => {
   const [worldModule, chunkModule, blockModule, mcDataModule] = await Promise.all([

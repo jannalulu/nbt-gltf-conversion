@@ -4,13 +4,13 @@ import { loadImage } from 'node-canvas-webgl/lib/index.js'
 import gl from 'gl'
 import { promises as fs } from 'fs'
 import { Vec3 } from 'vec3'
-import prismarineViewer from 'prismarine-viewer'
 import { parse, simplify } from 'prismarine-nbt'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import mcAssets from 'minecraft-assets'
 import path from 'path'
-import { fileURLToPath } from 'url'
 import { Blob, FileReader } from 'vblob'
+import EnhancedMockWorker from './enhancedmockworker.js'
+import EnhancedWorldView from './enhancedworldview.js'
 
 // Polyfills for GLTF export and canvas
 global.Blob = Blob
@@ -79,181 +79,6 @@ const createMockCanvas = (width, height) => {
   return canvas
 }
 
-class EnhancedMockWorker {
-  constructor(scene, mcData) {
-    this.scene = scene
-    this.mcData = mcData
-    this.meshes = new Map()
-    this.atlas = null
-    this.uvMapping = {}
-    this.blockStates = null
-    
-    this.handleMessage = this.handleMessage.bind(this)
-    this.postMessage = this.handleMessage
-  }
-
-  handleMessage(data) {
-    if (data.type === 'add_mesh') {
-      this.addMesh(data)
-    } else {
-      console.warn('Unknown message type:', data.type)
-    }
-  }
-
-  setAtlas(atlas, uvMapping, blockStates) {
-    this.atlas = atlas
-    this.uvMapping = uvMapping
-    this.blockStates = blockStates
-    console.log('Atlas set with:', {
-      hasAtlas: !!atlas,
-      mappingCount: Object.keys(uvMapping).length,
-      statesCount: Object.keys(blockStates || {}).length
-    })
-  }
-
-  getBlockState(blockId) {
-    const block = this.mcData.blocks[blockId]
-    if (!block) return null
-
-    // Get block state from our loaded states
-    const blockState = this.blockStates[block.name]
-    if (!blockState) {
-      console.warn(`No block state found for ${block.name}`)
-      return null
-    }
-
-    return blockState
-  }
-
-  getTextureForBlock(blockName, textureType = 'all') {
-    // Try different texture naming patterns
-    const patterns = [
-      `${blockName}`,                    // Basic name
-      `${blockName}_${textureType}`,     // With type suffix
-      blockName.replace('_block', ''),   // Without _block suffix
-      blockName.split('_')[0],           // Base material name
-    ]
-
-    for (const pattern of patterns) {
-      if (this.uvMapping[pattern]) {
-        return {
-          uvs: this.uvMapping[pattern],
-          name: pattern
-        }
-      }
-    }
-
-    // Log the failure to find a texture
-    console.warn(`No texture found for ${blockName} (${textureType}) in available textures:`, 
-      Object.keys(this.uvMapping).filter(k => k.includes(blockName.split('_')[0])))
-    
-    return null
-  }
-
-  createMaterial(blockId) {
-    const block = this.mcData.blocks[blockId]
-    if (!block || !this.atlas) {
-      console.warn(`Unable to create material for block ${blockId}`)
-      return new THREE.MeshStandardMaterial({ color: 0x808080 })
-    }
-
-    // Get texture info
-    const textureInfo = this.getTextureForBlock(block.name)
-    if (!textureInfo) {
-      console.warn(`No texture found for ${block.name}`)
-      return new THREE.MeshStandardMaterial({ color: 0x808080 })
-    }
-
-    // Create material
-    const material = new THREE.MeshStandardMaterial({
-      map: this.atlas.clone(),
-      transparent: block.transparent || false,
-      alphaTest: block.transparent ? 0.1 : 0,
-      side: THREE.FrontSide,
-      roughness: 1.0,
-      metalness: 0.0
-    })
-
-    // Set UV mapping
-    const { uvs } = textureInfo
-    material.map.repeat.set(uvs.width, uvs.height)
-    material.map.offset.set(uvs.x, uvs.y)
-    material.map.needsUpdate = true
-
-    return material
-  }
-
-  addMesh(data) {
-    console.log('Adding mesh:', {
-      chunkPos: `${data.x},${data.z}`,
-      blockCount: data.blocks?.length || 0
-    })
-    
-    const { x, z, blocks } = data
-    
-    // Group blocks by type for batch processing
-    const blocksByType = new Map()
-    for (const block of blocks) {
-      if (!block || !block.position || block.type === 0) continue
-      
-      if (!blocksByType.has(block.type)) {
-        blocksByType.set(block.type, [])
-      }
-      blocksByType.get(block.type).push(block)
-    }
-
-    // Process each block type
-    for (const [blockType, typeBlocks] of blocksByType) {
-      const blockName = this.mcData.blocks[blockType]?.name
-      if (!blockName) {
-        console.warn(`Unknown block type: ${blockType}`)
-        continue
-      }
-
-      // Create geometry with proper face orientation
-      const geometry = new THREE.BoxGeometry(1, 1, 1)
-      const material = this.createMaterial(blockType)
-
-      // Create instanced mesh for better performance
-      const instancedMesh = new THREE.InstancedMesh(
-        geometry,
-        material,
-        typeBlocks.length
-      )
-
-      // Set positions for each instance
-      const matrix = new THREE.Matrix4()
-      typeBlocks.forEach((block, index) => {
-        matrix.setPosition(
-          x * 16 + block.position[0],
-          block.position[1],
-          z * 16 + block.position[2]
-        )
-        instancedMesh.setMatrixAt(index, matrix)
-      })
-
-      instancedMesh.castShadow = true
-      instancedMesh.receiveShadow = true
-      
-      // Store mesh for cleanup
-      const meshId = `${x},${z},${blockType}`
-      if (this.meshes.has(meshId)) {
-        const oldMesh = this.meshes.get(meshId)
-        this.scene.remove(oldMesh)
-        oldMesh.geometry.dispose()
-        if (Array.isArray(oldMesh.material)) {
-          oldMesh.material.forEach(m => m.dispose())
-        } else {
-          oldMesh.material.dispose()
-        }
-      }
-      
-      this.meshes.set(meshId, instancedMesh)
-      this.scene.add(instancedMesh)
-    }
-  }
-}
-
 // Setup global environment
 const setupGlobalEnv = () => {
   global.Worker = EnhancedMockWorker
@@ -275,97 +100,6 @@ const setupGlobalEnv = () => {
   }
 }
 
-// Enhanced world view implementation
-class EnhancedWorldView {
-  constructor(world, viewDistance, center, scene, mcData) {
-    this.world = world
-    this.viewDistance = viewDistance
-    this.center = center
-    this.scene = scene
-    this.mcData = mcData
-    this.worker = new EnhancedMockWorker(scene, mcData)
-    this.isStarted = false
-  }
-
-  async init(pos) {
-    this.center = pos
-    return true
-  }
-
-  updatePosition(pos) {
-    this.center = pos
-  }
-
-  async generateMeshes() {
-    const promises = []
-    try {
-      const blocks = []
-      const scanRange = 32
-      
-      for (let x = -scanRange; x <= scanRange; x++) {
-        for (let y = 0; y < 256; y++) {
-          for (let z = -scanRange; z <= scanRange; z++) {
-            const worldX = this.center.x + x
-            const worldY = y
-            const worldZ = this.center.z + z
-            
-            try {
-              const block = await this.world.getBlock(new Vec3(worldX, worldY, worldZ))
-              if (block && block.type !== 0) {
-                const localChunkX = Math.floor(worldX / 16)
-                const localChunkZ = Math.floor(worldZ / 16)
-                const localX = worldX - (localChunkX * 16)
-                const localZ = worldZ - (localChunkZ * 16)
-                
-                blocks.push({
-                  chunkX: localChunkX,
-                  chunkZ: localChunkZ,
-                  type: block.type,
-                  position: [parseInt(localX), parseInt(worldY), parseInt(localZ)]
-                })
-              }
-            } catch (e) {
-              continue
-            }
-          }
-        }
-      }
-
-      // Group blocks by chunk
-      const chunkBlocks = new Map()
-      for (const block of blocks) {
-        const key = `${block.chunkX},${block.chunkZ}`
-        if (!chunkBlocks.has(key)) {
-          chunkBlocks.set(key, [])
-        }
-        chunkBlocks.get(key).push(block)
-      }
-
-      // Create meshes for each chunk
-      for (const [key, chunkBlockList] of chunkBlocks) {
-        const [chunkX, chunkZ] = key.split(',').map(Number)
-        
-        promises.push(
-          new Promise((resolve) => {
-            this.worker.postMessage({
-              type: 'add_mesh',
-              x: chunkX,
-              z: chunkZ,
-              blocks: chunkBlockList
-            })
-            resolve()
-          })
-        )
-      }
-
-    } catch (e) {
-      console.warn(`Failed to process chunks:`, e)
-    }
-    
-    await Promise.all(promises)
-    return promises.length
-  }
-}
 
 // Initialize renderer
 const initRenderer = () => {
@@ -445,7 +179,10 @@ const exportGLTF = (scene, fileName) => {
       {
         binary: false,
         onlyVisible: true,
-        includeCustomExtensions: true
+        includeCustomExtensions: true,
+        trs: false,
+        animations: [],
+        extensionsUsed: ['KHR_materials_unlit']
       })
     } catch (error) {
       clearTimeout(timeout)
@@ -661,6 +398,16 @@ const createTextureAtlas = async (assets) => {
       }
     }
 
+        // Debug output for specific blocks
+        const blocksToCheck = ['lantern', 'stone_bricks', 'oak_planks', 'dirt']
+        console.log('Checking specific blocks:', blocksToCheck.map(name => ({
+          name,
+          hasMapping: name in uvMapping,
+          textureInfo: textureArray.find(entry => entry.name === name),
+          texturePath: textureArray.find(entry => entry.name === name)?.texture
+        })))
+    
+
     console.log('Texture processing complete:', {
       processedCount,
       mappingCount: Object.keys(uvMapping).length
@@ -713,6 +460,94 @@ const createTextureAtlas = async (assets) => {
     throw error
   }
 }
+
+class BlockModelLoader {
+  constructor(assetsDirectory) {
+    this.assetsDirectory = assetsDirectory;
+    this.modelCache = new Map();
+    this.blockModels = null;
+  }
+
+  async loadBlockModels() {
+    try {
+      // Load block models JSON
+      const modelsPath = path.join(this.assetsDirectory, 'blocks_models.json');
+      const modelData = JSON.parse(await fs.readFile(modelsPath, 'utf8'));
+      this.blockModels = modelData;
+
+      // Process and cache each model
+      for (const [modelName, model] of Object.entries(modelData)) {
+        this.processModel(modelName, model);
+      }
+
+      console.log(`Loaded ${Object.keys(this.blockModels).length} block models`);
+      return this.blockModels;
+    } catch (error) {
+      console.error('Error loading block models:', error);
+      throw error;
+    }
+  }
+
+  processModel(modelName, model) {
+    // Handle parent inheritance
+    if (model.parent) {
+      const parentModel = this.blockModels[model.parent.replace('minecraft:block/', '')];
+      if (parentModel) {
+        model = this.mergeModels(parentModel, model);
+      }
+    }
+
+    // Process textures
+    if (model.textures) {
+      model.textures = this.resolveTextureReferences(model.textures);
+    }
+
+    // Cache the processed model
+    this.modelCache.set(modelName, model);
+    return model;
+  }
+
+  mergeModels(parent, child) {
+    const merged = { ...parent };
+
+    // Merge textures
+    if (child.textures) {
+      merged.textures = { ...parent.textures, ...child.textures };
+    }
+
+    // Merge elements if present
+    if (child.elements) {
+      merged.elements = child.elements;
+    }
+
+    // Merge other properties
+    if (child.ambientocclusion !== undefined) {
+      merged.ambientocclusion = child.ambientocclusion;
+    }
+
+    return merged;
+  }
+
+  resolveTextureReferences(textures) {
+    const resolved = {};
+    for (const [key, value] of Object.entries(textures)) {
+      if (typeof value === 'string' && value.startsWith('#')) {
+        // Resolve texture reference
+        const refKey = value.substring(1);
+        resolved[key] = textures[refKey] || value;
+      } else {
+        resolved[key] = value;
+      }
+    }
+    return resolved;
+  }
+
+  getModel(blockName) {
+    return this.modelCache.get(blockName);
+  }
+}
+
+console.log('Starting application...')
 
 const main = async () => {
   try {
@@ -772,12 +607,13 @@ const main = async () => {
       mcModules.mcData
     )
 
-    // Set the atlas and mappings
+    // Initialize the worker with models
+    await worldView.worker.initialize(assets.directory)
     worldView.worker.setAtlas(atlas, uvMapping, blockStates)
 
     await worldView.init(center)
     viewer.listen(worldView)
-    
+      
     console.log('Generating meshes...')
     const meshCount = await worldView.generateMeshes()
     console.log('Meshes generated:', meshCount)

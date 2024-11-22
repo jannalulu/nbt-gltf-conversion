@@ -27,7 +27,6 @@
     "prismarine-block": "^1.19.0",
     "prismarine-chunk": "^1.35.0",
     "prismarine-nbt": "^2.2.1",
-    "prismarine-viewer": "^1.28.0",
     "prismarine-world": "^3.6.3",
     "three": "^0.160.0",
     "three-gltf-exporter": "^0.0.1",

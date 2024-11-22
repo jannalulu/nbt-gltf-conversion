@@ -41,14 +41,13 @@ class BlockModelLoader {
           const cleanName = this.cleanTexturePath(entry.name)
           const cleanTexture = this.cleanTexturePath(entry.texture)
           
-          // Store all variants of the texture name
           const variants = [
             cleanName,
             `block/${cleanName}`,
             `minecraft:block/${cleanName}`,
             cleanTexture,
             cleanTexture.split('/').pop(),
-            entry.texture // Keep original texture path too
+            entry.texture
           ]
 
           variants.forEach(variant => {
@@ -72,133 +71,87 @@ class BlockModelLoader {
 
   getModel(blockName) {
     const cleanName = this.cleanTexturePath(blockName)
-    console.log(`Getting model for ${blockName} (cleaned: ${cleanName})`)
-
-    // Special case handling
-    if (cleanName === 'glass_pane') {
-      return this.getGlassPaneModel()
-    } else if (cleanName === 'lantern') {
-      return this.getLanternModel()
-    }
-
+    
     // Try cached model first
     const cached = this.modelCache.get(cleanName)
     if (cached) return cached
 
     // Get base model
-    let model = this.blockModels[cleanName] || this.blockModels[`block/${cleanName}`]
+    let model = this.blockModels[cleanName]
+    if (!model) {
+      model = this.blockModels[`block/${cleanName}`]
+    }
     
     if (!model) {
-      console.warn(`No direct model found for ${cleanName}`)
+      console.warn(`No model found for ${cleanName}`)
       return null
     }
 
     // Process the model
     model = this.processModel(cleanName, model)
     
-    console.log(`Processed model for ${cleanName}:`, {
-      hasTextures: !!model.textures,
-      textureCount: model.textures ? Object.keys(model.textures).length : 0,
-      sampleTextures: model.textures ? Object.entries(model.textures).slice(0, 2) : []
-    })
-
     return model
-  }
-
-  getGlassPaneModel() {
-    // Combine post and side models for glass panes
-    const postModel = this.blockModels['glass_pane_post'] || this.blockModels['block/glass_pane_post']
-    const sideModel = this.blockModels['glass_pane_side'] || this.blockModels['block/glass_pane_side']
-
-    if (!postModel || !sideModel) {
-      console.warn('Missing glass pane model components')
-      return null
-    }
-
-    // Create combined model
-    const combinedModel = {
-      elements: [
-        ...(postModel.elements || []),
-        ...(sideModel.elements || [])
-      ],
-      textures: {
-        ...postModel.textures,
-        ...sideModel.textures,
-        particle: 'minecraft:block/glass',
-        pane: 'minecraft:block/glass'
-      }
-    }
-
-    return this.processModel('glass_pane', combinedModel)
-  }
-
-  getLanternModel() {
-    const model = this.blockModels['lantern'] || this.blockModels['block/lantern']
-    if (!model) {
-      console.warn('No lantern model found')
-      return null
-    }
-
-    // Ensure proper texture mappings for lantern
-    const processedModel = this.processModel('lantern', {
-      ...model,
-      textures: {
-        ...model.textures,
-        particle: 'minecraft:block/lantern',
-        lantern: 'minecraft:block/lantern',
-        all: 'minecraft:block/lantern'
-      }
-    })
-
-    // Add any missing UV mappings
-    if (processedModel.elements) {
-      processedModel.elements.forEach(element => {
-        if (element.faces) {
-          Object.values(element.faces).forEach(face => {
-            if (!face.uv) {
-              face.uv = [0, 0, 16, 16]
-            }
-          })
-        }
-      })
-    }
-
-    return processedModel
   }
 
   processModel(modelName, model) {
     if (!model) return null
 
-    // Create a deep copy
+    // Create a deep copy to avoid modifying the original
     const processed = JSON.parse(JSON.stringify(model))
 
-    // Handle parent inheritance
+    // First, handle parent inheritance recursively
     if (processed.parent) {
       const parentName = this.cleanTexturePath(processed.parent)
       const parentModel = this.blockModels[parentName]
       
       if (parentModel) {
-        const mergedModel = this.mergeModels(parentModel, processed)
-        processed.textures = mergedModel.textures
-        processed.elements = mergedModel.elements
+        // Process parent first
+        const processedParent = this.processModel(parentName, parentModel)
+        // Then merge with current model
+        this.mergeModels(processed, processedParent)
       }
     }
 
-    // Ensure textures object exists
+    // Handle textures
     if (!processed.textures) {
       processed.textures = {}
     }
 
-    // Try to find textures if none are specified
-    if (Object.keys(processed.textures).length === 0) {
-      processed.textures = {
-        all: `minecraft:block/${modelName}`,
-        particle: `minecraft:block/${modelName}`
-      }
-    }
+    // Resolve texture variables
+    processed.textures = this.resolveTextureReferences(processed.textures)
 
-    // Resolve texture references
-    processed.textures = this.resolveTextureReferences(processed.textures, modelName)
+    // Process elements and their faces
+    if (processed.elements) {
+      processed.elements = processed.elements.map(element => {
+        // Handle faces
+        if (element.faces) {
+          Object.entries(element.faces).forEach(([faceName, face]) => {
+            // Resolve texture reference
+            if (face.texture && face.texture.startsWith('#')) {
+              const textureKey = face.texture.substring(1)
+              face.texture = processed.textures[textureKey] || face.texture
+            }
+
+            // Normalize UV coordinates (Minecraft uses 0-16 range)
+            if (face.uv) {
+              face.uv = face.uv.map(coord => coord / 16)
+            }
+          })
+        }
+
+        // Handle rotation
+        if (element.rotation) {
+          element.rotation.origin = element.rotation.origin.map(coord => coord / 16)
+          element.rotation.angle = (element.rotation.angle * Math.PI) / 180
+        }
+
+        // Convert coordinates from Minecraft space (0-16) to Three.js space (0-1)
+        element.from = element.from.map(coord => coord / 16)
+        element.to = element.to.map(coord => coord / 16)
+
+        return element
+      })
+    }
 
     // Cache the processed model
     this.modelCache.set(modelName, processed)
@@ -206,7 +159,7 @@ class BlockModelLoader {
     return processed
   }
 
-  resolveTextureReferences(textures, modelName) {
+  resolveTextureReferences(textures) {
     const resolved = {}
     const seen = new Set()
 
@@ -217,17 +170,19 @@ class BlockModelLoader {
       // Handle reference to another texture
       if (value.startsWith('#')) {
         const referencedKey = value.substring(1)
-        return textures[referencedKey] ? resolveReference(key, textures[referencedKey]) : value
+        return textures[referencedKey] ? resolveReference(referencedKey, textures[referencedKey]) : value
       }
 
       // Get actual texture path from mapping
-      const mappedTexture = this.textureMap.get(this.cleanTexturePath(value))
+      const cleanPath = this.cleanTexturePath(value)
+      const mappedTexture = this.textureMap.get(cleanPath)
+      
       if (mappedTexture) {
         return mappedTexture
       }
 
-      // Return cleaned value if no mapping found
-      return this.cleanTexturePath(value)
+      // If no mapping found, try to clean up the path
+      return cleanPath
     }
 
     // Resolve all texture references
@@ -238,6 +193,30 @@ class BlockModelLoader {
     return resolved
   }
 
+  mergeModels(target, source) {
+    // Don't merge if source is null
+    if (!source) return target
+
+    // Merge textures
+    if (source.textures) {
+      target.textures = { ...source.textures, ...target.textures }
+    }
+
+    // Merge elements
+    if (source.elements && !target.elements) {
+      target.elements = [...source.elements]
+    }
+
+    // Copy any other properties that don't exist in target
+    Object.keys(source).forEach(key => {
+      if (!(key in target)) {
+        target[key] = source[key]
+      }
+    })
+
+    return target
+  }
+
   cleanTexturePath(path) {
     if (!path) return path
     return path.replace('minecraft:', '')
@@ -245,22 +224,6 @@ class BlockModelLoader {
                .replace(/^blocks\//, '')
                .replace(/^item\//, '')
                .replace(/^items\//, '')
-  }
-
-  mergeModels(parent, child) {
-    const merged = {
-      ...parent,
-      ...child,
-      textures: { ...parent.textures, ...child.textures }
-    }
-
-    if (parent.elements && child.elements) {
-      merged.elements = [...parent.elements, ...child.elements]
-    } else {
-      merged.elements = child.elements || parent.elements
-    }
-
-    return merged
   }
 }
 

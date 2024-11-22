@@ -326,9 +326,11 @@ const processNBT = async (buffer, { World, Chunk, Block, mcData }) => {
 
 const createTextureAtlas = async (assets) => {
   try {
-    // Load block textures JSON as an array
-    const blocksTexturesPath = path.join(assets.directory, 'blocks_textures.json')
-    const textureArray = JSON.parse(await fs.readFile(blocksTexturesPath, 'utf8'))
+    // Load block and item textures
+    const [blockTexturesData, itemTexturesData] = await Promise.all([
+      fs.readFile(path.join(assets.directory, 'blocks_textures.json'), 'utf8').then(JSON.parse),
+      fs.readFile(path.join(assets.directory, 'items_textures.json'), 'utf8').then(JSON.parse)
+    ])
 
     const ATLAS_SIZE = 2048
     const TEXTURE_SIZE = 16
@@ -337,47 +339,82 @@ const createTextureAtlas = async (assets) => {
     const ctx = atlasCanvas.getContext('2d')
     ctx.clearRect(0, 0, ATLAS_SIZE, ATLAS_SIZE)
 
+    console.log('Sample texture entries:', {
+      blocks: blockTexturesData.slice(0, 3).map(entry => ({
+        name: entry.name,
+        texture: entry.texture,
+        model: entry.model
+      })),
+      items: itemTexturesData.slice(0, 3).map(entry => ({
+        name: entry.name,
+        texture: entry.texture,
+        model: entry.model
+      }))
+    })
+
     const uvMapping = {}
     let x = 0
     let y = 0
     let processedCount = 0
 
-    // Process each texture entry in the array
-    for (const entry of textureArray) {
+    const allTextures = [...blockTexturesData, ...itemTexturesData]
+
+    for (const entry of allTextures) {
       try {
-        // Skip entries with no texture
         if (!entry.texture || entry.texture === 'null' || entry.name === 'air') {
           continue
         }
 
-        const isItem = entry.texture.includes('items/')
-        const baseDir = isItem ? 'items' : 'blocks'
+        // Clean up names and paths
+        const name = entry.name.replace('minecraft:', '')
+        const texture = entry.texture.replace('minecraft:', '')
+        let texturePath
 
-        const texturePath = entry.texture
-          .replace('minecraft:blocks/', '')
-          .replace('minecraft:items/', '')
-          .replace('blocks/', '')
-          .replace('items/', '')
+        if (texture.includes('entity/')) {
+          // Entity textures are directly in version directory
+          texturePath = path.join(assets.directory, texture + '.png')
+        } else if (texture.startsWith('item/') || texture.startsWith('items/')) {
+          // Handle item textures
+          const itemName = texture.replace('item/', '').replace('items/', '')
+          texturePath = path.join(assets.directory, 'items', `${itemName}.png`)
+        } else {
+          // Handle block textures
+          const blockName = texture.replace('block/', '').replace('blocks/', '')
+          texturePath = path.join(assets.directory, 'blocks', `${blockName}.png`)
+        }
 
-        const blockName = entry.name
-        // Use the appropriate directory in the path
-        const fullTexturePath = path.join(assets.directory, baseDir, `${texturePath}.png`)
-        
         try {
-          const image = await loadImage(fullTexturePath)
-          
-          // Draw texture to atlas
+          const image = await loadImage(texturePath)
           ctx.drawImage(image, x, y, TEXTURE_SIZE, TEXTURE_SIZE)
 
-          // Store UV mapping using block name
-          uvMapping[blockName] = {
+          const mappingData = {
             x: x / ATLAS_SIZE,
             y: y / ATLAS_SIZE,
             width: TEXTURE_SIZE / ATLAS_SIZE,
             height: TEXTURE_SIZE / ATLAS_SIZE
           }
 
-          // Move to next position
+          // Store multiple variations of the name for better lookup
+          const mappings = new Set([
+            name,                                    // raw name
+            texture,                                 // full texture path
+            texture.split('/').pop(),                // texture name without path
+            `block/${name}`,                         // block prefixed
+            name.replace('block/', ''),              // clean block name
+            texture.replace('block/', '')            // clean texture name
+          ])
+
+          // Add variants for blocks
+          if (!texture.includes('item/') && !texture.includes('entity/')) {
+            mappings.add(`minecraft:block/${name}`)
+            mappings.add(`minecraft:blocks/${name}`)
+          }
+
+          // Store all mappings
+          for (const mapping of mappings) {
+            uvMapping[mapping] = mappingData
+          }
+
           x += TEXTURE_SIZE
           if (x + TEXTURE_SIZE > ATLAS_SIZE) {
             x = 0
@@ -391,22 +428,27 @@ const createTextureAtlas = async (assets) => {
           processedCount++
 
         } catch (error) {
-          console.warn(`Failed to load texture for ${blockName} at ${fullTexturePath}`)
+          console.warn(`Failed to load texture for ${name} at ${texturePath}`)
+          // Log the full attempted path for debugging
+          console.log('Attempted path:', path.resolve(texturePath))
         }
       } catch (error) {
-        console.warn(`Failed to process texture entry:`, error)
+        console.warn('Failed to process texture entry:', error)
       }
     }
 
-        // Debug output for specific blocks
-        const blocksToCheck = ['lantern', 'stone_bricks', 'oak_planks', 'dirt']
-        console.log('Checking specific blocks:', blocksToCheck.map(name => ({
-          name,
-          hasMapping: name in uvMapping,
-          textureInfo: textureArray.find(entry => entry.name === name),
-          texturePath: textureArray.find(entry => entry.name === name)?.texture
-        })))
+    // Debug output for specific blocks
+    const blocksToCheck = ['granite', 'stone_bricks', 'oak_planks', 'glass_pane', 'dirt', 
+                          'dark_oak_stairs', 'grass_block', 'lantern', 'crafting_table', 
+                          'furnace', 'red_bed']
     
+    console.log('Checking problematic blocks:', blocksToCheck.map(name => ({
+      name,
+      hasMapping: name in uvMapping,
+      mappingVariants: Object.keys(uvMapping).filter(key => 
+        key.includes(name) || key.endsWith(`/${name}`)
+      )
+    })))
 
     console.log('Texture processing complete:', {
       processedCount,
@@ -421,129 +463,21 @@ const createTextureAtlas = async (assets) => {
     textureAtlas.flipY = false
     textureAtlas.needsUpdate = true
 
-    // Store mapping data
     textureAtlas.userData = {
       uvMapping,
       textureSize: TEXTURE_SIZE,
       atlasSize: { width: ATLAS_SIZE, height: ATLAS_SIZE }
     }
 
-    // Create block states
-    const blockStates = {}
-    for (const [blockName, uvs] of Object.entries(uvMapping)) {
-      blockStates[blockName] = {
-        variants: {
-          "normal": {
-            model: {
-              textures: {
-                all: blockName,
-                top: blockName,
-                side: blockName,
-                bottom: blockName
-              }
-            }
-          }
-        },
-        name: blockName
-      }
-    }
-
     return {
       atlas: textureAtlas,
       uvMapping,
-      blockStates,
       textureSize: TEXTURE_SIZE
     }
 
   } catch (error) {
     console.error('Error in texture atlas creation:', error)
     throw error
-  }
-}
-
-class BlockModelLoader {
-  constructor(assetsDirectory) {
-    this.assetsDirectory = assetsDirectory;
-    this.modelCache = new Map();
-    this.blockModels = null;
-  }
-
-  async loadBlockModels() {
-    try {
-      // Load block models JSON
-      const modelsPath = path.join(this.assetsDirectory, 'blocks_models.json');
-      const modelData = JSON.parse(await fs.readFile(modelsPath, 'utf8'));
-      this.blockModels = modelData;
-
-      // Process and cache each model
-      for (const [modelName, model] of Object.entries(modelData)) {
-        this.processModel(modelName, model);
-      }
-
-      console.log(`Loaded ${Object.keys(this.blockModels).length} block models`);
-      return this.blockModels;
-    } catch (error) {
-      console.error('Error loading block models:', error);
-      throw error;
-    }
-  }
-
-  processModel(modelName, model) {
-    // Handle parent inheritance
-    if (model.parent) {
-      const parentModel = this.blockModels[model.parent.replace('minecraft:block/', '')];
-      if (parentModel) {
-        model = this.mergeModels(parentModel, model);
-      }
-    }
-
-    // Process textures
-    if (model.textures) {
-      model.textures = this.resolveTextureReferences(model.textures);
-    }
-
-    // Cache the processed model
-    this.modelCache.set(modelName, model);
-    return model;
-  }
-
-  mergeModels(parent, child) {
-    const merged = { ...parent };
-
-    // Merge textures
-    if (child.textures) {
-      merged.textures = { ...parent.textures, ...child.textures };
-    }
-
-    // Merge elements if present
-    if (child.elements) {
-      merged.elements = child.elements;
-    }
-
-    // Merge other properties
-    if (child.ambientocclusion !== undefined) {
-      merged.ambientocclusion = child.ambientocclusion;
-    }
-
-    return merged;
-  }
-
-  resolveTextureReferences(textures) {
-    const resolved = {};
-    for (const [key, value] of Object.entries(textures)) {
-      if (typeof value === 'string' && value.startsWith('#')) {
-        // Resolve texture reference
-        const refKey = value.substring(1);
-        resolved[key] = textures[refKey] || value;
-      } else {
-        resolved[key] = value;
-      }
-    }
-    return resolved;
-  }
-
-  getModel(blockName) {
-    return this.modelCache.get(blockName);
   }
 }
 
@@ -588,7 +522,7 @@ const main = async () => {
 
     // Load Minecraft assets
     const assets = mcAssets(VERSION)
-    const { atlas, uvMapping, blockStates } = await createTextureAtlas(assets)
+    const { atlas, uvMapping, textureSize } = await createTextureAtlas(assets)
     const { world, size } = await processNBT(buffer, mcModules)
     console.log('NBT data processed. Structure size:', size)
     
@@ -607,9 +541,14 @@ const main = async () => {
       mcModules.mcData
     )
 
-    // Initialize the worker with models
+    console.log('Initializing worker...')
     await worldView.worker.initialize(assets.directory)
-    worldView.worker.setAtlas(atlas, uvMapping, blockStates)
+    worldView.worker.setAtlas(atlas, uvMapping)
+
+    console.log('Worker initialized with atlas data:', {
+      hasAtlas: !!atlas,
+      mappingCount: Object.keys(uvMapping).length
+    })
 
     await worldView.init(center)
     viewer.listen(worldView)

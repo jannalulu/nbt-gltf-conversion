@@ -1,108 +1,149 @@
-import path from 'path';
-import { promises as fs } from 'fs';
+import path from 'path'
+import { promises as fs } from 'fs'
 
 class BlockModelLoader {
   constructor(assetsDirectory) {
-    this.assetsDirectory = assetsDirectory;
-    this.modelCache = new Map();
-    this.blockModels = null;
-    this.blockStates = null;
+    this.assetsDirectory = assetsDirectory
+    this.modelCache = new Map()
+    this.blockModels = null
   }
 
   async loadBlockModels() {
     try {
-      // Load both models and states
-      const [modelData, stateData] = await Promise.all([
-        fs.readFile(path.join(this.assetsDirectory, 'blocks_models.json')).then(JSON.parse),
-        fs.readFile(path.join(this.assetsDirectory, 'blocks_states.json')).then(JSON.parse)
-      ]);
+      // Load block models JSON
+      const modelsPath = path.join(this.assetsDirectory, 'blocks_models.json')
+      console.log('Loading models from:', modelsPath)
+      
+      const modelData = JSON.parse(await fs.readFile(modelsPath, 'utf8'))
+      console.log('Sample of loaded models:', 
+        Object.entries(modelData)
+          .slice(0, 3)
+          .map(([name, model]) => ({
+            name,
+            hasParent: !!model.parent,
+            hasTextures: !!model.textures,
+            parent: model.parent,
+            textures: model.textures
+          }))
+      )
 
-      this.blockModels = modelData;
-      this.blockStates = stateData;
-      return this.blockModels;
+      this.blockModels = modelData
+
+      // Process and cache each model
+      for (const [modelName, model] of Object.entries(modelData)) {
+        console.log(`Processing model ${modelName}`)
+        const processed = this.processModel(modelName, model)
+        console.log('Processed result:', {
+          name: modelName,
+          hasTextures: !!processed?.textures,
+          textures: processed?.textures
+        })
+      }
+
+      return this.blockModels
     } catch (error) {
-      console.error('Error loading block data:', error);
-      throw error;
+      console.error('Error loading block models:', error)
+      throw error
     }
   }
 
-  getModel(blockName, variant = null) {
-    // Check if block has states/variants
-    const blockState = this.blockStates?.[blockName];
-    let modelName = blockName;
-    let rotation = { x: 0, y: 0 };
+  getModel(blockName) {
+    console.log('Getting model for:', blockName, {
+      inCache: this.modelCache.has(blockName),
+      inModels: blockName in this.blockModels,
+      cacheKeys: Array.from(this.modelCache.keys()).slice(0, 5)
+    })
 
-    if (blockState?.variants) {
-      // Get default variant if none specified
-      const variantKey = variant || Object.keys(blockState.variants)[0];
-      const variantData = blockState.variants[variantKey];
+    // Try with different name variations
+    const variations = [
+      blockName,
+      `block/${blockName}`,
+      blockName.replace('block/', '')
+    ]
 
-      if (variantData) {
-        // Handle both single variant and multiple possibilities
-        const variantModel = Array.isArray(variantData) ? variantData[0] : variantData;
-        
-        if (variantModel.model) {
-          modelName = variantModel.model.replace('minecraft:block/', '');
+    for (const name of variations) {
+      const model = this.modelCache.get(name)
+      if (model) {
+        console.log('Found model for', blockName, 'using variant', name, {
+          hasTextures: !!model.textures,
+          textures: model.textures
+        })
+        return model
+      }
+    }
+
+    // If not in cache, try to load from blockModels
+    for (const name of variations) {
+      if (name in this.blockModels) {
+        const model = this.processModel(name, this.blockModels[name])
+        console.log('Processed new model for', blockName, {
+          hasTextures: !!model.textures,
+          textures: model.textures
+        })
+        return model
+      }
+    }
+
+    console.warn(`No model found for ${blockName}`)
+    return null
+  }
+
+  processModel(modelName, model) {
+    console.log('Processing model:', {
+      name: modelName,
+      originalTextures: model.textures,
+      parent: model.parent
+    })
+
+    // Create a deep copy to avoid modifying original
+    const processed = JSON.parse(JSON.stringify(model))
+
+    // Handle parent inheritance
+    if (processed.parent) {
+      const parentName = processed.parent.replace('minecraft:block/', '')
+      const parentModel = this.blockModels[parentName]
+
+      if (parentModel) {
+        const mergedModel = this.mergeModels(parentModel, processed)
+        processed.textures = mergedModel.textures
+        processed.elements = mergedModel.elements
+      }
+    }
+
+    // Resolve texture references
+    if (processed.textures) {
+      processed.textures = this.resolveTextureReferences(processed.textures)
+    }
+
+    // Cache the processed model
+    this.modelCache.set(modelName, processed)
+    return processed
+  }
+
+  resolveTextureReferences(textures) {
+    const resolved = {}
+    const seen = new Set()
+
+    for (const [key, value] of Object.entries(textures)) {
+      if (!seen.has(value)) {
+        seen.add(value)
+        if (value.startsWith('#')) {
+          resolved[key] = textures[value.substring(1)] || value
+        } else {
+          resolved[key] = value
         }
-        
-        // Store rotation data
-        rotation.x = variantModel.x || 0;
-        rotation.y = variantModel.y || 0;
       }
     }
 
-    // Get the base model
-    let model = this.blockModels[modelName];
-    if (!model) {
-      console.warn(`No model found for ${blockName} (${modelName})`);
-      return null;
-    }
-
-    // Resolve parent chain
-    const modelChain = [];
-    let currentModel = model;
-    while (currentModel?.parent) {
-      const parentName = currentModel.parent.replace('minecraft:block/', '');
-      const parentModel = this.blockModels[parentName];
-      if (!parentModel) {
-        console.warn(`Parent model ${parentName} not found for ${blockName}`);
-        break;
-      }
-      modelChain.unshift(parentModel);
-      currentModel = parentModel;
-    }
-
-    // Merge all models in chain
-    let finalModel = modelChain.reduce((merged, next) => this.mergeModels(merged, next), {});
-    finalModel = this.mergeModels(finalModel, model);
-
-    // Add rotation data
-    finalModel.rotation = rotation;
-
-    return finalModel;
+    return resolved
   }
 
   mergeModels(parent, child) {
-    const merged = { ...parent };
-
-    // Merge textures
-    merged.textures = { ...parent.textures };
-    for (const [key, value] of Object.entries(child.textures || {})) {
-      if (value.startsWith('#')) {
-        const ref = value.substring(1);
-        merged.textures[key] = merged.textures[ref] || child.textures[ref] || value;
-      } else {
-        merged.textures[key] = value;
-      }
+    return {
+      ...parent,
+      ...child,
+      textures: { ...parent.textures, ...child.textures }
     }
-
-    // Child elements override parent elements
-    if (child.elements) {
-      merged.elements = child.elements;
-    }
-
-    return merged;
   }
 }
-
-export default BlockModelLoader;
+export default BlockModelLoader

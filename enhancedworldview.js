@@ -22,11 +22,11 @@ class EnhancedWorldView {
   }
 
   async generateMeshes() {
-    const promises = []
     try {
       const blocks = []
       const scanRange = 32
       
+      console.log('Scanning blocks...')
       for (let x = -scanRange; x <= scanRange; x++) {
         for (let y = 0; y < 256; y++) {
           for (let z = -scanRange; z <= scanRange; z++) {
@@ -56,6 +56,8 @@ class EnhancedWorldView {
         }
       }
 
+      console.log(`Found ${blocks.length} blocks to process`)
+
       // Group blocks by chunk
       const chunkBlocks = new Map()
       for (const block of blocks) {
@@ -66,29 +68,30 @@ class EnhancedWorldView {
         chunkBlocks.get(key).push(block)
       }
 
-      // Create meshes for each chunk
+      console.log(`Grouped into ${chunkBlocks.size} chunks`)
+
+      // Process each chunk
+      let meshCount = 0
       for (const [key, chunkBlockList] of chunkBlocks) {
         const [chunkX, chunkZ] = key.split(',').map(Number)
         
-        promises.push(
-          new Promise((resolve) => {
-            this.worker.postMessage({
-              type: 'add_mesh',
-              x: chunkX,
-              z: chunkZ,
-              blocks: chunkBlockList
-            })
-            resolve()
-          })
-        )
+        // Send blocks to worker
+        const result = this.worker.addMesh({
+          x: chunkX,
+          z: chunkZ,
+          blocks: chunkBlockList
+        })
+        
+        if (result) meshCount++
       }
 
+      console.log(`Generated ${meshCount} meshes`)
+      return meshCount
+
     } catch (e) {
-      console.warn(`Failed to process chunks:`, e)
+      console.error('Failed to process chunks:', e)
+      throw e
     }
-    
-    await Promise.all(promises)
-    return promises.length
   }
 }
 

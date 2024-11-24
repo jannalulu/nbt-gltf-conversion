@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import BlockModelLoader from './blockmodelloader.js'
+import BlockModelRenderer from './blockmodelrenderer.js'
 
 class EnhancedMockWorker {
   constructor(scene, mcData) {
@@ -12,6 +13,7 @@ class EnhancedMockWorker {
     this.geometryCache = new Map()
     this.modelLoader = null
     this.materialCache = new Map()
+    this.modelRenderer = new BlockModelRenderer(scene)
   }
 
   async initialize(assetsDirectory) {
@@ -89,8 +91,9 @@ class EnhancedMockWorker {
     }
 
     try {
-      // Use standard geometry for all blocks including lanterns
-      const geometry = new THREE.BoxGeometry(1, 1, 1)
+      // Get the model and create geometry using BlockModelRenderer
+      const model = this.modelLoader.getModel(block.name, block.metadata)
+      const geometry = this.modelRenderer.createGeometryFromModel(model)
       const material = this.createMaterial(blockType)
 
       const instancedMesh = new THREE.InstancedMesh(

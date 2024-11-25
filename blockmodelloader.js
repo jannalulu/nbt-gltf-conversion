@@ -69,94 +69,163 @@ class BlockModelLoader {
     }
   }
 
-  getModel(blockName) {
+  getModel(blockName, blockState = {}) {
     const cleanName = this.cleanTexturePath(blockName)
     
     // Try cached model first
-    const cached = this.modelCache.get(cleanName)
+    const modelKey = this.cleanTexturePath(blockName.split('[')[0]) // Base name without state
+    const cacheKey = `${modelKey}:${JSON.stringify(blockState)}`
+    const cached = this.modelCache.get(cacheKey)
     if (cached) return cached
 
-    // Get base model
-    let model = this.blockModels[cleanName]
-    if (!model) {
-      model = this.blockModels[`block/${cleanName}`]
+    // Get state-specific variant
+    const blockStateData = this.blockStates[cleanName]
+    let modelName = cleanName
+
+    // Try multiple model name patterns
+    const modelPatterns = [
+      cleanName,
+      `block/${cleanName}`,
+      `minecraft:block/${cleanName}`,
+      cleanName.replace('minecraft:', ''),
+      cleanName.split('[')[0] // Try without state data
+    ]
+
+    // Add state-specific variants
+    if (blockStateData?.variants) {
+      const stateString = Object.entries(blockState)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(',') || ''
+      
+      const variant = blockStateData.variants[stateString] || blockStateData.variants['']
+      if (variant?.model) {
+        modelPatterns.push(
+          this.cleanTexturePath(variant.model),
+          `block/${this.cleanTexturePath(variant.model)}`,
+          `minecraft:block/${this.cleanTexturePath(variant.model)}`
+        )
+      }
     }
-    
+
+    // Try each pattern until we find a model
+    for (const pattern of modelPatterns) {
+      const model = this.blockModels[pattern]
+      if (model) {
+        modelName = pattern
+        break
+      }
+    }
+
+    // Get and process model
+    let model = this.blockModels[modelName]
+    if (!model && modelName.includes('block/')) {
+      model = this.blockModels[modelName.replace('block/', '')]
+    }
+
     if (!model) {
-      console.warn(`No model found for ${cleanName}`)
+      console.warn(`No model found for ${modelName}`)
       return null
     }
 
-    // Process the model
-    model = this.processModel(cleanName, model)
+    // Process and cache the model
+    console.log('Loading model:', {
+      name: modelName,
+      state: blockState,
+      hasParent: !!model.parent,
+      parentName: model.parent,
+      elementCount: model.elements?.length
+    })
     
-    return model
+    const processed = this.processModel(modelName, model)
+    this.modelCache.set(cacheKey, processed)
+    
+    return processed
   }
 
   processModel(modelName, model) {
     if (!model) return null
 
-    // Create a deep copy to avoid modifying the original
+    // Create a deep copy
     const processed = JSON.parse(JSON.stringify(model))
 
-    // First, handle parent inheritance recursively
+    // Handle parent inheritance recursively
     if (processed.parent) {
-      const parentName = this.cleanTexturePath(processed.parent)
-      const parentModel = this.blockModels[parentName]
+      // Try multiple parent name patterns without cleaning
+      const parentPatterns = [
+        processed.parent,
+        processed.parent.replace('minecraft:', ''),
+        `block/${processed.parent.replace('minecraft:', '')}`,
+        processed.parent.replace('block/', '')
+      ]
+      
+      let parentModel = null
+      let foundPattern = null
+      for (const pattern of parentPatterns) {
+        parentModel = this.blockModels[pattern]
+        if (parentModel) {
+          foundPattern = pattern
+          break
+        }
+      }
       
       if (parentModel) {
-        // Process parent first
-        const processedParent = this.processModel(parentName, parentModel)
-        // Then merge with current model
+        const processedParent = this.processModel(foundPattern, parentModel)
         this.mergeModels(processed, processedParent)
       }
     }
 
-    // Handle textures
-    if (!processed.textures) {
-      processed.textures = {}
-    }
+    // Process textures
+    processed.textures = this.resolveTextures(processed.textures || {})
 
-    // Resolve texture variables
-    processed.textures = this.resolveTextureReferences(processed.textures)
-
-    // Process elements and their faces
+    // Process elements
     if (processed.elements) {
       processed.elements = processed.elements.map(element => {
-        // Handle faces
-        if (element.faces) {
-          Object.entries(element.faces).forEach(([faceName, face]) => {
-            // Resolve texture reference
-            if (face.texture && face.texture.startsWith('#')) {
-              const textureKey = face.texture.substring(1)
-              face.texture = processed.textures[textureKey] || face.texture
-            }
-
-            // Normalize UV coordinates (Minecraft uses 0-16 range)
-            if (face.uv) {
-              face.uv = face.uv.map(coord => coord / 16)
-            }
-          })
-        }
-
-        // Handle rotation
-        if (element.rotation) {
-          element.rotation.origin = element.rotation.origin.map(coord => coord / 16)
-          element.rotation.angle = (element.rotation.angle * Math.PI) / 180
-        }
-
-        // Convert coordinates from Minecraft space (0-16) to Three.js space (0-1)
-        element.from = element.from.map(coord => coord / 16)
-        element.to = element.to.map(coord => coord / 16)
-
-        return element
+        // Keep original coordinates (0-16) for proper scaling
+        return this.processElement(element, processed.textures)
       })
     }
 
-    // Cache the processed model
-    this.modelCache.set(modelName, processed)
-    
     return processed
+  }
+
+  processElement(element, textures) {
+    // Keep original Minecraft coordinates (0-16)
+    const processed = {
+      ...element,
+      from: element.from,
+      to: element.to
+    }
+
+    // Process rotation
+    if (element.rotation) {
+      processed.rotation = {
+        ...element.rotation,
+        origin: element.rotation.origin,  // Keep original coordinates
+        angle: element.rotation.angle     // Keep angle in degrees
+      }
+    }
+
+    // Process faces
+    if (element.faces) {
+      processed.faces = {}
+      for (const [face, data] of Object.entries(element.faces)) {
+        processed.faces[face] = {
+          ...data,
+          uv: data.uv?.map(v => v / 16), // Convert from MC 16x16 space to UV 0-1 space
+          texture: this.resolveTextureReferences(data.texture, textures)
+        }
+      }
+    }
+
+    return processed
+  }
+
+  resolveTextures(textures) {
+    const resolved = {}
+    for (const [key, value] of Object.entries(textures)) {
+      resolved[key] = this.resolveTextureReferences(value, textures)
+    }
+    return resolved
   }
 
   resolveTextureReferences(textures) {

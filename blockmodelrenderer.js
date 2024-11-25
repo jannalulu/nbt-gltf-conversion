@@ -6,153 +6,215 @@ class BlockModelRenderer {
     this.scene = scene
     this.geometryCache = new Map()
     this.materialCache = new Map()
+    
+    // Default geometry for blocks without models (full 1x1x1 block)
+    this.defaultGeometry = new THREE.BoxGeometry(1, 1, 1)
+    this.defaultGeometry.translate(0.5, 0.5, 0.5)
   }
 
   createGeometryFromModel(model) {
-    if (!model || !model.elements) {
-      return new THREE.BoxGeometry(1, 1, 1) // Fallback to basic cube
+    if (!model?.elements?.length) {
+      return this.defaultGeometry.clone()
     }
 
     const geometries = []
     
     for (const element of model.elements) {
-      // Convert Minecraft coordinates (0-16) to Three.js coordinates (0-1)
-      const from = element.from.map(v => v / 16)
-      const to = element.to.map(v => v / 16)
-      
-      // Create box geometry for this element
-      const width = to[0] - from[0]
-      const height = to[1] - from[1]
-      const depth = to[2] - from[2]
-      
-      const geometry = new THREE.BoxGeometry(width, height, depth)
-      
-      // Center the geometry
-      geometry.translate(
-        from[0] + width / 2 - 0.5,
-        from[1] + height / 2 - 0.5,
-        from[2] + depth / 2 - 0.5
-      )
-
-      // Apply rotations if specified
-      if (element.rotation) {
-        const angle = (element.rotation.angle * Math.PI) / 180
-        const origin = element.rotation.origin.map(v => v / 16 - 0.5)
-        
-        geometry.translate(-origin[0], -origin[1], -origin[2])
-        
-        switch (element.rotation.axis) {
-          case 'x':
-            geometry.rotateX(angle)
-            break
-          case 'y':
-            geometry.rotateY(angle)
-            break
-          case 'z':
-            geometry.rotateZ(angle)
-            break
+      try {
+        if (!element.from || !element.to || 
+            element.from.length !== 3 || element.to.length !== 3) {
+          continue
         }
-        
-        geometry.translate(origin[0], origin[1], origin[2])
-      }
 
-      // Apply UVs based on the face definitions
-      if (element.faces) {
-        const uvs = geometry.attributes.uv
-        const uvArray = uvs.array
+        // Model loader already scaled coordinates to 0-1
+        const from = element.from
+        const to = element.to
         
-        for (const [face, data] of Object.entries(element.faces)) {
-          const faceIndex = ['east', 'west', 'up', 'down', 'south', 'north'].indexOf(face)
-          if (faceIndex === -1) continue
+        // Calculate dimensions
+        const size = [
+          Math.abs(to[0] - from[0]) / 16,
+          Math.abs(to[1] - from[1]) / 16,
+          Math.abs(to[2] - from[2]) / 16
+        ]
+
+        // Add small offset to prevent z-fighting
+        const geometry = new THREE.BoxGeometry(
+          Math.max(size[0], 0.001),
+          Math.max(size[1], 0.001),
+          Math.max(size[2], 0.001)
+        )
+
+        // Position relative to block origin
+        const position = [
+          from[0] + size[0] / 2,
+          from[1] + size[1] / 2,
+          from[2] + size[2] / 2
+        ]
+        
+        geometry.translate(...position)
+
+        // Handle rotations
+        if (element.rotation) {
+          const { origin, angle, axis } = element.rotation
           
-          const baseIndex = faceIndex * 8 // 4 vertices * 2 coordinates per vertex
-          const uv = data.uv || [0, 0, 16, 16]
+          if (origin && origin.length === 3) {
+            // Model loader already scaled rotation origin
+            const rotOrigin = origin
+            
+            geometry.translate(
+              -rotOrigin[0],
+              -rotOrigin[1],
+              -rotOrigin[2]
+            )
+            
+            const rotAngle = angle * Math.PI / 180
+            const rotMatrix = new THREE.Matrix4()
+            
+            switch (axis) {
+              case 'x': rotMatrix.makeRotationX(rotAngle); break
+              case 'y': rotMatrix.makeRotationY(rotAngle); break
+              case 'z': rotMatrix.makeRotationZ(rotAngle); break
+            }
+            
+            geometry.applyMatrix4(rotMatrix)
+            
+            geometry.translate(
+              rotOrigin[0],
+              rotOrigin[1],
+              rotOrigin[2]
+            )
+          }
+        }
+
+        // UV mapping
+        if (element.faces) {
+          const faceMap = {
+            east:  0,
+            west:  1,
+            up:    2,
+            down:  3,
+            south: 4,
+            north: 5
+          }
+
+          const uvAttribute = geometry.attributes.uv
           
-          // Convert Minecraft UVs (0-16) to Three.js UVs (0-1)
-          const uvScale = 1 / 16
-          uvArray[baseIndex + 0] = uv[0] * uvScale
-          uvArray[baseIndex + 1] = uv[1] * uvScale
-          uvArray[baseIndex + 2] = uv[2] * uvScale
-          uvArray[baseIndex + 3] = uv[1] * uvScale
-          uvArray[baseIndex + 4] = uv[0] * uvScale
-          uvArray[baseIndex + 5] = uv[3] * uvScale
-          uvArray[baseIndex + 6] = uv[2] * uvScale
-          uvArray[baseIndex + 7] = uv[3] * uvScale
+          for (const [faceName, faceData] of Object.entries(element.faces)) {
+            if (!faceData?.uv || faceData.uv.length !== 4 || 
+                !(faceName in faceMap)) {
+              continue
+            }
+
+            const faceIndex = faceMap[faceName]
+            const baseIndex = faceIndex * 8
+            
+            // Model loader already scaled UVs
+            const uv = faceData.uv
+            
+            if (faceData.rotation) {
+              const rad = (faceData.rotation * Math.PI) / 180
+              const center = [
+                (uv[0] + uv[2]) / 2,
+                (uv[1] + uv[3]) / 2
+              ]
+              
+              const rotatePoint = (u, v) => {
+                const du = u - center[0]
+                const dv = v - center[1]
+                const cos = Math.cos(rad)
+                const sin = Math.sin(rad)
+                return [
+                  center[0] + du * cos - dv * sin,
+                  center[1] + du * sin + dv * cos
+                ]
+              }
+
+              const uv1 = rotatePoint(uv[0], uv[1])
+              const uv2 = rotatePoint(uv[2], uv[1])
+              const uv3 = rotatePoint(uv[0], uv[3])
+              const uv4 = rotatePoint(uv[2], uv[3])
+
+              uvAttribute.array[baseIndex    ] = uv1[0]
+              uvAttribute.array[baseIndex + 1] = uv1[1]
+              uvAttribute.array[baseIndex + 2] = uv2[0]
+              uvAttribute.array[baseIndex + 3] = uv2[1]
+              uvAttribute.array[baseIndex + 4] = uv3[0]
+              uvAttribute.array[baseIndex + 5] = uv3[1]
+              uvAttribute.array[baseIndex + 6] = uv4[0]
+              uvAttribute.array[baseIndex + 7] = uv4[1]
+            } else {
+              uvAttribute.array[baseIndex    ] = uv[0]
+              uvAttribute.array[baseIndex + 1] = uv[1]
+              uvAttribute.array[baseIndex + 2] = uv[2]
+              uvAttribute.array[baseIndex + 3] = uv[1]
+              uvAttribute.array[baseIndex + 4] = uv[0]
+              uvAttribute.array[baseIndex + 5] = uv[3]
+              uvAttribute.array[baseIndex + 6] = uv[2]
+              uvAttribute.array[baseIndex + 7] = uv[3]
+            }
+          }
+
+          uvAttribute.needsUpdate = true
         }
-        
-        uvs.needsUpdate = true
-      }
 
-      geometries.push(geometry)
-    }
+        geometry.computeBoundingSphere()
+        geometries.push(geometry)
 
-    // Merge all element geometries into one
-    if (geometries.length === 0) {
-      return new THREE.BoxGeometry(1, 1, 1)
-    } else if (geometries.length === 1) {
-      return geometries[0]
-    } else {
-      const mergedGeometry = mergeGeometries(geometries)
-      geometries.forEach(g => g.dispose())
-      return mergedGeometry
-    }
-  }
-
-  applyTextureToMaterial(material, textures, blockStates, uvMapping) {
-    if (!material || !textures || !blockStates) return material
-
-    const state = blockStates[Object.keys(blockStates)[0]] // Get first state
-    if (!state || !state.variants || !state.variants.normal) return material
-
-    const variant = state.variants.normal
-    if (!variant.model || !variant.model.textures) return material
-
-    // Apply textures based on the model's texture definitions
-    const modelTextures = variant.model.textures
-    for (const [key, textureName] of Object.entries(modelTextures)) {
-      const textureKey = textureName.replace(/^minecraft:(block\/|item\/|items\/)?/, '')
-      if (uvMapping[textureKey]) {
-        const uvs = uvMapping[textureKey]
-        if (material.map) {
-          material.map.repeat.set(uvs.width, uvs.height)
-          material.map.offset.set(uvs.x, uvs.y)
-          material.map.needsUpdate = true
-        }
+      } catch (error) {
+        console.warn('Error processing element:', error)
+        continue
       }
     }
 
-    return material
+    try {
+      if (geometries.length === 0) {
+        return this.defaultGeometry.clone()
+      } else if (geometries.length === 1) {
+        return geometries[0]
+      } else {
+        const mergedGeometry = mergeGeometries(geometries, false)
+        geometries.forEach(g => g.dispose())
+        return mergedGeometry || this.defaultGeometry.clone()
+      }
+    } catch (error) {
+      console.warn('Error merging geometries:', error)
+      return this.defaultGeometry.clone()
+    }
   }
 
   createBlockMesh(blockId, model, textures, blockStates, uvMapping) {
-    const cacheKey = `${blockId}_${model?.parent || 'default'}`
-    
-    let geometry = this.geometryCache.get(cacheKey)
-    if (!geometry) {
-      geometry = this.createGeometryFromModel(model)
-      this.geometryCache.set(cacheKey, geometry)
+    try {
+      if (!model) {
+        model = {
+          elements: [{
+            from: [0, 0, 0],
+            to: [16, 16, 16],
+            faces: {
+              north: { uv: [0, 0, 16, 16] },
+              south: { uv: [0, 0, 16, 16] },
+              east: { uv: [0, 0, 16, 16] },
+              west: { uv: [0, 0, 16, 16] },
+              up: { uv: [0, 0, 16, 16] },
+              down: { uv: [0, 0, 16, 16] }
+            }
+          }]
+        }
+      }
+
+      const geometry = this.createGeometryFromModel(model)
+      if (!geometry) return null
+
+      const material = this.createMaterial(blockId)
+      
+      // Enable face culling for proper 3D rendering
+      material.side = THREE.FrontSide
+      
+      return new THREE.Mesh(geometry, material)
+
+    } catch (error) {
+      console.warn('Error creating block mesh:', error)
+      return null
     }
-
-    const material = this.createMaterial(blockId)
-    this.applyTextureToMaterial(material, textures, blockStates, uvMapping)
-
-    return new THREE.Mesh(geometry, material)
-  }
-
-  createMaterial(blockId) {
-    if (this.materialCache.has(blockId)) {
-      return this.materialCache.get(blockId).clone()
-    }
-
-    const material = new THREE.MeshStandardMaterial({
-      roughness: 1.0,
-      metalness: 0.0,
-      transparent: true,
-      alphaTest: 0.1
-    })
-
-    this.materialCache.set(blockId, material)
-    return material
   }
 }
 

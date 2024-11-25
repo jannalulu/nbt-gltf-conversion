@@ -16,7 +16,7 @@ class BlockModelLoader {
       const modelData = modelsJson.trim().split('</blocks_models.json>')[0]
         .replace('<blocks_models.json>', '')
         .trim()
-
+        
       this.blockModels = JSON.parse(modelData)
 
       // Load block states
@@ -72,218 +72,174 @@ class BlockModelLoader {
   getModel(blockName, blockState = {}) {
     const cleanName = this.cleanTexturePath(blockName)
     
-    // Try cached model first
-    const modelKey = this.cleanTexturePath(blockName.split('[')[0]) // Base name without state
-    const cacheKey = `${modelKey}:${JSON.stringify(blockState)}`
-    const cached = this.modelCache.get(cacheKey)
-    if (cached) return cached
-
-    // Get state-specific variant
-    const blockStateData = this.blockStates[cleanName]
-    let modelName = cleanName
-
-    // Try multiple model name patterns
-    const modelPatterns = [
-      cleanName,
-      `block/${cleanName}`,
-      `minecraft:block/${cleanName}`,
-      cleanName.replace('minecraft:', ''),
-      cleanName.split('[')[0] // Try without state data
-    ]
-
-    // Add state-specific variants
-    if (blockStateData?.variants) {
-      const stateString = Object.entries(blockState)
-        .map(([key, value]) => `${key}=${value}`)
-        .join(',') || ''
-      
-      const variant = blockStateData.variants[stateString] || blockStateData.variants['']
-      if (variant?.model) {
-        modelPatterns.push(
-          this.cleanTexturePath(variant.model),
-          `block/${this.cleanTexturePath(variant.model)}`,
-          `minecraft:block/${this.cleanTexturePath(variant.model)}`
-        )
-      }
+    // Convert block state values to strings if they're not already
+    const state = Object.fromEntries(
+      Object.entries(blockState).map(([k, v]) => [k, String(v)])
+    )
+    
+    // Special case handling
+    switch (cleanName) {
+      case 'glass_pane':
+        return this.createGlassPaneModel(state)
+      case 'lantern':
+        return this.createLanternModel(state)
+      default:
+        return this.getDefaultModel(cleanName)
     }
+  }
 
-    // Try each pattern until we find a model
-    for (const pattern of modelPatterns) {
-      const model = this.blockModels[pattern]
-      if (model) {
-        modelName = pattern
-        break
-      }
-    }
-
-    // Get and process model
-    let model = this.blockModels[modelName]
-    if (!model && modelName.includes('block/')) {
-      model = this.blockModels[modelName.replace('block/', '')]
-    }
-
-    if (!model) {
-      console.warn(`No model found for ${modelName}`)
+  createLanternModel(state) {
+    console.log('Creating lantern model with state:', state)
+    
+    const isHanging = state.hanging === 'true'
+    const templateName = isHanging ? 'template_hanging_lantern' : 'template_lantern'
+    
+    // Get the base template
+    const template = this.blockModels[templateName]
+    if (!template) {
+      console.warn(`No template found for ${templateName}`)
       return null
     }
 
-    // Process and cache the model
-    console.log('Loading model:', {
-      name: modelName,
-      state: blockState,
-      hasParent: !!model.parent,
-      parentName: model.parent,
+    // Create model with correct template and textures
+    const model = {
+      ...template,
+      textures: {
+        ...template.textures,
+        lantern: 'minecraft:block/lantern'
+      }
+    }
+
+    console.log('Created lantern model:', {
+      template: templateName,
+      isHanging,
       elementCount: model.elements?.length
     })
-    
-    const processed = this.processModel(modelName, model)
-    this.modelCache.set(cacheKey, processed)
-    
-    return processed
+
+    return this.resolveModelParent(model)
   }
 
-  processModel(modelName, model) {
+  createGlassPaneModel(state) {
+    console.log('Creating glass pane model with state:', state)
+    
+    const model = {
+      parent: 'block/block',
+      textures: {
+        pane: 'minecraft:block/glass',
+        edge: 'minecraft:block/glass_pane_top'
+      },
+      elements: []
+    }
+
+    // Add central post if any connections exist
+    if (state.north === 'true' || state.south === 'true' || 
+        state.east === 'true' || state.west === 'true') {
+      const postModel = this.blockModels['template_glass_pane_post']
+      if (postModel?.elements) {
+        model.elements.push(...postModel.elements)
+      }
+    }
+
+    // Add connecting panes based on state
+    const directions = ['north', 'south', 'east', 'west']
+    const angles = { north: 0, south: 180, east: 90, west: -90 }
+    
+    for (const dir of directions) {
+      if (state[dir] === 'true') {
+        const sideModel = this.blockModels['template_glass_pane_side']
+        if (sideModel?.elements) {
+          const rotatedElements = this.rotateElements(
+            sideModel.elements, 
+            angles[dir]
+          )
+          model.elements.push(...rotatedElements)
+        }
+      }
+    }
+
+    // Add no-side elements where there are no connections
+    if (!directions.some(dir => state[dir] === 'true')) {
+      const nosideModel = this.blockModels['template_glass_pane_noside']
+      if (nosideModel?.elements) {
+        model.elements.push(...nosideModel.elements)
+      }
+    }
+
+    return model
+  }
+
+  getDefaultModel(blockName) {
+    const modelPatterns = [
+      blockName,
+      `minecraft:block/${blockName}`,
+      `block/${blockName}`,
+      blockName.replace('minecraft:', '')
+    ]
+
+    let model = null
+    for (const pattern of modelPatterns) {
+      model = this.blockModels[pattern]
+      if (model) break
+    }
+
+    if (!model) {
+      console.warn(`No model found for ${blockName}`)
+      return null
+    }
+
+    return this.resolveModelParent(model)
+  }
+
+  rotateElements(elements, angle) {
+    return elements.map(element => ({
+      ...element,
+      rotation: {
+        origin: [8, 8, 8],
+        axis: 'y',
+        angle: angle + (element.rotation?.angle || 0)
+      }
+    }))
+  }
+
+  resolveModelParent(model, visited = new Set()) {
     if (!model) return null
 
-    // Create a deep copy
-    const processed = JSON.parse(JSON.stringify(model))
+    const processedModel = { ...model }
 
-    // Handle parent inheritance recursively
-    if (processed.parent) {
-      // Try multiple parent name patterns without cleaning
+    if (model.parent) {
       const parentPatterns = [
-        processed.parent,
-        processed.parent.replace('minecraft:', ''),
-        `block/${processed.parent.replace('minecraft:', '')}`,
-        processed.parent.replace('block/', '')
+        model.parent,
+        model.parent.replace('minecraft:', ''),
+        model.parent.replace('block/', ''),
+        `minecraft:block/${model.parent}`,
+        `block/${model.parent}`,
+        model.parent.replace('template_', ''),
+        `template_${model.parent}`,
+        model.parent.replace('minecraft:block/', '')
       ]
-      
+
       let parentModel = null
-      let foundPattern = null
       for (const pattern of parentPatterns) {
+        if (visited.has(pattern)) continue
+        
         parentModel = this.blockModels[pattern]
         if (parentModel) {
-          foundPattern = pattern
+          visited.add(pattern)
+          const resolvedParent = this.resolveModelParent(parentModel, visited)
+          
+          if (resolvedParent) {
+            processedModel.elements = resolvedParent.elements || processedModel.elements
+            processedModel.textures = { 
+              ...resolvedParent.textures, 
+              ...processedModel.textures 
+            }
+          }
           break
         }
       }
-      
-      if (parentModel) {
-        const processedParent = this.processModel(foundPattern, parentModel)
-        this.mergeModels(processed, processedParent)
-      }
     }
 
-    // Process textures
-    processed.textures = this.resolveTextures(processed.textures || {})
-
-    // Process elements
-    if (processed.elements) {
-      processed.elements = processed.elements.map(element => {
-        // Keep original coordinates (0-16) for proper scaling
-        return this.processElement(element, processed.textures)
-      })
-    }
-
-    return processed
-  }
-
-  processElement(element, textures) {
-    // Keep original Minecraft coordinates (0-16)
-    const processed = {
-      ...element,
-      from: element.from,
-      to: element.to
-    }
-
-    // Process rotation
-    if (element.rotation) {
-      processed.rotation = {
-        ...element.rotation,
-        origin: element.rotation.origin,  // Keep original coordinates
-        angle: element.rotation.angle     // Keep angle in degrees
-      }
-    }
-
-    // Process faces
-    if (element.faces) {
-      processed.faces = {}
-      for (const [face, data] of Object.entries(element.faces)) {
-        processed.faces[face] = {
-          ...data,
-          uv: data.uv?.map(v => v / 16), // Convert from MC 16x16 space to UV 0-1 space
-          texture: this.resolveTextureReferences(data.texture, textures)
-        }
-      }
-    }
-
-    return processed
-  }
-
-  resolveTextures(textures) {
-    const resolved = {}
-    for (const [key, value] of Object.entries(textures)) {
-      resolved[key] = this.resolveTextureReferences(value, textures)
-    }
-    return resolved
-  }
-
-  resolveTextureReferences(textures) {
-    const resolved = {}
-    const seen = new Set()
-
-    const resolveReference = (key, value) => {
-      if (!value || seen.has(value)) return value
-      seen.add(value)
-
-      // Handle reference to another texture
-      if (value.startsWith('#')) {
-        const referencedKey = value.substring(1)
-        return textures[referencedKey] ? resolveReference(referencedKey, textures[referencedKey]) : value
-      }
-
-      // Get actual texture path from mapping
-      const cleanPath = this.cleanTexturePath(value)
-      const mappedTexture = this.textureMap.get(cleanPath)
-      
-      if (mappedTexture) {
-        return mappedTexture
-      }
-
-      // If no mapping found, try to clean up the path
-      return cleanPath
-    }
-
-    // Resolve all texture references
-    for (const [key, value] of Object.entries(textures)) {
-      resolved[key] = resolveReference(key, value)
-    }
-
-    return resolved
-  }
-
-  mergeModels(target, source) {
-    // Don't merge if source is null
-    if (!source) return target
-
-    // Merge textures
-    if (source.textures) {
-      target.textures = { ...source.textures, ...target.textures }
-    }
-
-    // Merge elements
-    if (source.elements && !target.elements) {
-      target.elements = [...source.elements]
-    }
-
-    // Copy any other properties that don't exist in target
-    Object.keys(source).forEach(key => {
-      if (!(key in target)) {
-        target[key] = source[key]
-      }
-    })
-
-    return target
+    return processedModel
   }
 
   cleanTexturePath(path) {
@@ -291,8 +247,6 @@ class BlockModelLoader {
     return path.replace('minecraft:', '')
                .replace(/^block\//, '')
                .replace(/^blocks\//, '')
-               .replace(/^item\//, '')
-               .replace(/^items\//, '')
   }
 }
 

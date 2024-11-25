@@ -7,9 +7,51 @@ class BlockModelRenderer {
     this.geometryCache = new Map()
     this.materialCache = new Map()
     
-    // Default geometry for blocks without models
     this.defaultGeometry = new THREE.BoxGeometry(1, 1, 1)
     this.defaultGeometry.translate(0.5, 0.5, 0.5)
+  }
+
+  createBlockMesh(blockId, model, textures, blockStates, uvMapping) {
+    try {
+      if (!model?.elements?.length) {
+        model = {
+          elements: [{
+            from: [0, 0, 0],
+            to: [16, 16, 16],
+            faces: {
+              north: { uv: [0, 0, 16, 16] },
+              south: { uv: [0, 0, 16, 16] },
+              east: { uv: [0, 0, 16, 16] },
+              west: { uv: [0, 0, 16, 16] },
+              up: { uv: [0, 0, 16, 16] },
+              down: { uv: [0, 0, 16, 16] }
+            }
+          }]
+        }
+      }
+
+      const geometry = this.createGeometryFromModel(model)
+      if (!geometry) return null
+
+      // Special material handling for lanterns
+      const material = this.createMaterial(blockId)
+      if (blockId === 'lantern' || model.parent?.includes('lantern')) {
+        material.transparent = true
+        material.opacity = 1.0
+        material.alphaTest = 0.1
+        material.side = THREE.DoubleSide
+        material.emissive = new THREE.Color(0xffa726)
+        material.emissiveIntensity = 0.6
+      } else {
+        material.side = THREE.FrontSide
+      }
+      
+      return new THREE.Mesh(geometry, material)
+
+    } catch (error) {
+      console.warn('Error creating block mesh:', error)
+      return null
+    }
   }
 
   createGeometryFromModel(model) {
@@ -26,18 +68,16 @@ class BlockModelRenderer {
           continue
         }
 
-        // Model loader already scaled coordinates to 0-1
         const from = element.from
         const to = element.to
         
-        // Calculate dimensions
         const size = [
           Math.abs(to[0] - from[0]) / 16,
           Math.abs(to[1] - from[1]) / 16,
           Math.abs(to[2] - from[2]) / 16
         ]
 
-        // Prevent z-fighting
+        // Create geometry with exact dimensions
         const geometry = new THREE.BoxGeometry(
           Math.max(size[0], 0.001),
           Math.max(size[1], 0.001),
@@ -46,9 +86,9 @@ class BlockModelRenderer {
 
         // Position relative to block origin
         const position = [
-          from[0] + size[0] / 2,
-          from[1] + size[1] / 2,
-          from[2] + size[2] / 2
+          (from[0] / 16) + (size[0] / 2),
+          (from[1] / 16) + (size[1] / 2),
+          (from[2] / 16) + (size[2] / 2)
         ]
         
         geometry.translate(...position)
@@ -58,8 +98,7 @@ class BlockModelRenderer {
           const { origin, angle, axis } = element.rotation
           
           if (origin && origin.length === 3) {
-            // Model loader already scaled rotation origin
-            const rotOrigin = origin
+            const rotOrigin = origin.map(v => v / 16)
             
             geometry.translate(
               -rotOrigin[0],
@@ -68,15 +107,11 @@ class BlockModelRenderer {
             )
             
             const rotAngle = angle * Math.PI / 180
-            const rotMatrix = new THREE.Matrix4()
-            
             switch (axis) {
-              case 'x': rotMatrix.makeRotationX(rotAngle); break
-              case 'y': rotMatrix.makeRotationY(rotAngle); break
-              case 'z': rotMatrix.makeRotationZ(rotAngle); break
+              case 'x': geometry.rotateX(rotAngle); break
+              case 'y': geometry.rotateY(rotAngle); break
+              case 'z': geometry.rotateZ(rotAngle); break
             }
-            
-            geometry.applyMatrix4(rotMatrix)
             
             geometry.translate(
               rotOrigin[0],
@@ -108,8 +143,8 @@ class BlockModelRenderer {
             const faceIndex = faceMap[faceName]
             const baseIndex = faceIndex * 8
             
-            // Model loader already scaled UVs
-            const uv = faceData.uv
+            // Scale UVs to 0-1 space if not already scaled
+            const uv = faceData.uv.map(v => v > 1 ? v / 16 : v)
             
             if (faceData.rotation) {
               const rad = (faceData.rotation * Math.PI) / 180
@@ -157,7 +192,6 @@ class BlockModelRenderer {
           uvAttribute.needsUpdate = true
         }
 
-        geometry.computeBoundingSphere()
         geometries.push(geometry)
 
       } catch (error) {
@@ -179,41 +213,6 @@ class BlockModelRenderer {
     } catch (error) {
       console.warn('Error merging geometries:', error)
       return this.defaultGeometry.clone()
-    }
-  }
-
-  createBlockMesh(blockId, model, textures, blockStates, uvMapping) {
-    try {
-      if (!model) {
-        model = {
-          elements: [{
-            from: [0, 0, 0],
-            to: [16, 16, 16],
-            faces: {
-              north: { uv: [0, 0, 16, 16] },
-              south: { uv: [0, 0, 16, 16] },
-              east: { uv: [0, 0, 16, 16] },
-              west: { uv: [0, 0, 16, 16] },
-              up: { uv: [0, 0, 16, 16] },
-              down: { uv: [0, 0, 16, 16] }
-            }
-          }]
-        }
-      }
-
-      const geometry = this.createGeometryFromModel(model)
-      if (!geometry) return null
-
-      const material = this.createMaterial(blockId)
-      
-      // Enable face culling for proper 3D rendering
-      material.side = THREE.FrontSide
-      
-      return new THREE.Mesh(geometry, material)
-
-    } catch (error) {
-      console.warn('Error creating block mesh:', error)
-      return null
     }
   }
 }

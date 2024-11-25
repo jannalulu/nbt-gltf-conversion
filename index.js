@@ -271,17 +271,19 @@ const processNBT = async (buffer, { World, Chunk, Block, mcData }) => {
     y: parsed.value.size.value.value[1],
     z: parsed.value.size.value.value[2],
   }
-  
-  VIEWPORT.center = new Vec3(
-    Math.floor(size.x / 2),
-    Math.floor(size.y / 2),
-    Math.floor(size.z / 2)
-  )
 
-  const palette = parsed.value.palette.value.value.map(block => ({
-    type: block.Name.value,
-    properties: block.Properties ? simplify(block.Properties) : {},
-  }))
+  const palette = parsed.value.palette.value.value.map(block => {
+    const type = block.Name.value
+    // Ensure properties are properly processed and preserved
+    const properties = block.Properties ? 
+      Object.entries(simplify(block.Properties)).reduce((acc, [key, value]) => {
+        acc[key] = value.toString()  // Convert all values to strings
+        return acc
+      }, {}) : {}
+
+    console.log('Processing block:', { type, properties })  // Debug output
+    return { type, properties }
+  })
 
   // Group blocks by chunk
   const chunkBlocks = new Map()
@@ -304,7 +306,8 @@ const processNBT = async (buffer, { World, Chunk, Block, mcData }) => {
     
     chunkBlocks.get(chunkKey).push({
       position: new Vec3(x, y, z),
-      block: Block.fromProperties(blockRef.id, properties, 1)
+      block: Block.fromProperties(blockRef.id, properties, 1),
+      state: properties  // Preserve the block state
     })
   }
 
@@ -314,10 +317,12 @@ const processNBT = async (buffer, { World, Chunk, Block, mcData }) => {
     const chunk = new Chunk()
     chunk.initialize(() => null)
     
-    for (const { position, block } of blocks) {
+    for (const { position, block, state } of blocks) {
       const localX = position.x % 16
       const localZ = position.z % 16
       chunk.setBlock(new Vec3(localX, position.y, localZ), block)
+      // Store block state in some way that will be accessible
+      block.metadata = state
     }
     
     await world.setColumn(chunkX, chunkZ, chunk)

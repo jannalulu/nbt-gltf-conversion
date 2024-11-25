@@ -112,8 +112,10 @@ const initRenderer = () => {
   const renderer = new THREE.WebGLRenderer({
     canvas,
     context: glContext,
-    antialias: true,
+    antialias: false,
     preserveDrawingBuffer: true,
+    logarithmicDepthBuffer: true,
+    alpha: false
   })
 
   renderer.setSize(VIEWPORT.width, VIEWPORT.height)
@@ -460,6 +462,7 @@ const createTextureAtlas = async (assets) => {
     textureAtlas.magFilter = THREE.NearestFilter
     textureAtlas.minFilter = THREE.NearestFilter
     textureAtlas.generateMipmaps = false
+    textureAtlas.anisotropy = 1
     textureAtlas.flipY = false
     textureAtlas.needsUpdate = true
 

@@ -65,10 +65,8 @@ class EnhancedMockWorker {
     // Create material with proper texture mapping
     const material = new THREE.MeshStandardMaterial({
       map: this.atlas.clone(),
-      transparent: block.transparent || blockName === 'lantern',
-      opacity: blockName === 'glass_pane' ? 0.8 : 1.0,
       alphaTest: 0.1,
-      side: THREE.DoubleSide,
+      side: THREE.FrontSide,
       roughness: 1.0,
       metalness: 0.0
     })
@@ -79,6 +77,7 @@ class EnhancedMockWorker {
     material.map.magFilter = THREE.NearestFilter
     material.map.minFilter = THREE.NearestFilter
     material.map.needsUpdate = true
+    material.map.anisotropy = 1
 
     return material
   }

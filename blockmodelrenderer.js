@@ -7,7 +7,7 @@ class BlockModelRenderer {
     this.geometryCache = new Map()
     this.materialCache = new Map()
     
-    // Default geometry for blocks without models (full 1x1x1 block)
+    // Default geometry for blocks without models
     this.defaultGeometry = new THREE.BoxGeometry(1, 1, 1)
     this.defaultGeometry.translate(0.5, 0.5, 0.5)
   }
@@ -37,7 +37,7 @@ class BlockModelRenderer {
           Math.abs(to[2] - from[2]) / 16
         ]
 
-        // Add small offset to prevent z-fighting
+        // Prevent z-fighting
         const geometry = new THREE.BoxGeometry(
           Math.max(size[0], 0.001),
           Math.max(size[1], 0.001),

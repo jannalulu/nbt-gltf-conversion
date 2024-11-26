@@ -486,7 +486,7 @@ const createTextureAtlas = async (assets) => {
 
 console.log('Starting application...')
 
-export const main = async (nbtBuffer) => {
+const main = async () => {
   try {
     setupGlobalEnv() // start environment
     
@@ -521,8 +521,7 @@ export const main = async (nbtBuffer) => {
     }
 
     console.log('Reading NBT file...')
-    // Use provided buffer or default
-    const buffer = nbtBuffer || await fs.readFile('./public/my_awesome_house.nbt')
+    const buffer = await fs.readFile('./public/my_awesome_house.nbt')
 
     // Load Minecraft assets
     const assets = mcAssets(VERSION)
@@ -578,7 +577,7 @@ export const main = async (nbtBuffer) => {
       throw error
     }
     
-    return viewer.scene
+    process.exit(0)
   } catch (error) {
     console.error('Error in main:', error, {
       stack: error.stack
@@ -586,10 +585,4 @@ export const main = async (nbtBuffer) => {
     process.exit(1)
   }
 }
-// Run directly if called from command line
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().then(() => process.exit(0)).catch(error => {
-    console.error('Error:', error)
-    process.exit(1)
-  })
-}
+main()
